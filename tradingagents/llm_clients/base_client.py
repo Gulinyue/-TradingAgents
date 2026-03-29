@@ -5,18 +5,26 @@ from typing import Any, Optional
 def normalize_content(response):
     """Normalize LLM response content to a plain string.
 
-    Multiple providers (OpenAI Responses API, Google Gemini 3) return content
-    as a list of typed blocks, e.g. [{'type': 'reasoning', ...}, {'type': 'text', 'text': '...'}].
-    Downstream agents expect response.content to be a string. This extracts
-    and joins the text blocks, discarding reasoning/metadata blocks.
+    Multiple providers return content as a list of typed blocks:
+    - dict: {'type': 'text', 'text': '...'}
+    - Pydantic TextBlock: TextBlock(type='text', text='...')
+    - Pydantic ThinkingBlock: ThinkingBlock(type='thinking', thinking='...')
+    Downstream agents expect response.content to be a plain string.
+    This extracts and joins text blocks, discarding thinking/reasoning blocks.
     """
     content = response.content
     if isinstance(content, list):
-        texts = [
-            item.get("text", "") if isinstance(item, dict) and item.get("type") == "text"
-            else item if isinstance(item, str) else ""
-            for item in content
-        ]
+        texts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    texts.append(item.get("text", ""))
+            elif hasattr(item, "type"):
+                if item.type == "text" and hasattr(item, "text"):
+                    texts.append(item.text)
+                # ThinkingBlock.type == "thinking": skip
+            elif isinstance(item, str):
+                texts.append(item)
         response.content = "\n".join(t for t in texts if t)
     return response
 

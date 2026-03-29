@@ -42,6 +42,15 @@ def get_default_config() -> Dict[str, Any]:
     cfg["quick_think_llm"] = "MiniMax-M2.7"
     cfg["max_debate_rounds"] = 1
     cfg["max_risk_discuss_rounds"] = 1
+
+    # 数据源：Tushare 优先（A 股），yfinance 作为全局兜底
+    # yfinance 对 A 股失效时会自然失败，不阻断；其他场景有 fallback
+    cfg["data_vendors"] = {
+        "core_stock_apis": "tushare,yfinance",
+        "fundamental_data": "tushare,alpha_vantage",
+        "news_data": "tushare,akshare,yfinance",
+    }
+
     return cfg
 
 
