@@ -521,3 +521,173 @@ COMMENT ON VIEW core.v_latest_positions IS '当前持仓视图（取每个账户
 GRANT SELECT ON core.v_latest_positions TO ta_app_rw, ta_panel_rw, ta_ml_ro;
 
 COMMIT;
+-- =========================================================
+-- V2: ADDITIONAL VIEWS AND ACCOUNT_CONSTRAINTS
+-- =========================================================
+
+-- Latest account balance view
+DROP VIEW IF EXISTS core.v_latest_account_balance;
+CREATE VIEW core.v_latest_account_balance AS
+SELECT
+    b.balance_id,
+    b.account_id,
+    a.account_code,
+    a.account_name,
+    b.as_of_date,
+    b.cash,
+    b.available_cash,
+    b.frozen_cash,
+    b.market_value,
+    b.total_equity,
+    b.nav,
+    b.total_units,
+    b.currency,
+    b.source,
+    b.metadata
+FROM core.account_balances b
+JOIN core.accounts a ON a.account_id = b.account_id
+WHERE b.as_of_date = (
+    SELECT MAX(as_of_date)
+    FROM core.account_balances
+    WHERE account_id = b.account_id
+);
+
+COMMENT ON VIEW core.v_latest_account_balance IS '账户最新资金净值快照';
+
+GRANT SELECT ON core.v_latest_account_balance TO ta_app_rw, ta_panel_rw, ta_ml_ro;
+
+-- Account portfolio snapshot view (one row per account)
+DROP VIEW IF EXISTS core.v_account_portfolio_snapshot;
+CREATE VIEW core.v_account_portfolio_snapshot AS
+SELECT
+    a.account_id,
+    a.account_code,
+    a.account_name,
+    a.account_type,
+    COALESCE(b.total_equity, 0)               AS total_equity,
+    COALESCE(b.nav, 1.0)                      AS nav,
+    COALESCE(b.cash, 0)                        AS total_cash,
+    COALESCE(b.available_cash, 0)             AS available_cash,
+    COALESCE(b.market_value, 0)                AS total_market_value,
+    COALESCE(p.position_count, 0)              AS position_count,
+    COALESCE(p.holding_count, 0)              AS holding_count,
+    COALESCE(p.total_weight, 0)               AS total_weight_pct,
+    COALESCE(p.cash_ratio, 0)                AS cash_ratio_pct,
+    COALESCE(p.top_symbol_weight, 0)           AS top_symbol_weight_pct,
+    COALESCE(p.top_sector_weight, 0)          AS top_sector_weight_pct,
+    b.as_of_date                               AS balance_date,
+    p.as_of_date                               AS positions_date
+FROM core.accounts a
+LEFT JOIN core.v_latest_account_balance b ON b.account_id = a.account_id
+LEFT JOIN LATERAL (
+    SELECT
+        COUNT(*)                                          AS position_count,
+        COUNT(*) FILTER (WHERE position_qty > 0)          AS holding_count,
+        SUM(market_value)                                 AS total_position_mv,
+        SUM(market_value) / NULLIF(b.total_equity, 0)   AS total_weight,
+        b.cash / NULLIF(b.total_equity, 0)               AS cash_ratio,
+        MAX(market_value / NULLIF(b.total_equity, 0))   AS top_symbol_weight,
+        0.0                                              AS top_sector_weight,
+        MAX(as_of_date)                                   AS as_of_date
+    FROM core.positions
+    WHERE account_id = a.account_id
+      AND as_of_date = (
+          SELECT MAX(as_of_date) FROM core.positions WHERE account_id = a.account_id
+      )
+) p ON TRUE;
+
+COMMENT ON VIEW core.v_account_portfolio_snapshot IS '账户组合汇总快照（持仓统计+资金统计）';
+
+GRANT SELECT ON core.v_account_portfolio_snapshot TO ta_app_rw, ta_panel_rw, ta_ml_ro;
+
+-- Sector exposure view
+DROP VIEW IF EXISTS core.v_sector_exposure;
+CREATE VIEW core.v_sector_exposure AS
+WITH latest_positions AS (
+    SELECT p.*
+    FROM core.positions p
+    WHERE p.as_of_date = (
+        SELECT MAX(as_of_date)
+        FROM core.positions
+        WHERE account_id = p.account_id
+    )
+),
+account_totals AS (
+    SELECT
+        account_id,
+        SUM(market_value) AS total_mv
+    FROM latest_positions
+    GROUP BY account_id
+)
+SELECT
+    lp.account_id,
+    a.account_code,
+    i.sector,
+    SUM(lp.market_value)                          AS sector_market_value,
+    ROUND(SUM(lp.market_value) / NULLIF(at.total_mv, 0) * 100, 4) AS sector_weight_pct,
+    COUNT(lp.symbol)                               AS holding_count,
+    ARRAY_AGG(lp.symbol ORDER BY lp.market_value DESC)
+        FILTER (WHERE i.sector IS NOT NULL)      AS holding_symbols,
+    lp.as_of_date                                 AS snapshot_date
+FROM latest_positions lp
+JOIN core.accounts a ON a.account_id = lp.account_id
+JOIN core.instruments i ON i.symbol = lp.symbol
+JOIN account_totals at ON at.account_id = lp.account_id
+WHERE i.sector IS NOT NULL
+GROUP BY lp.account_id, a.account_code, i.sector, lp.as_of_date, at.total_mv;
+
+COMMENT ON VIEW core.v_sector_exposure IS '账户行业暴露视图';
+
+GRANT SELECT ON core.v_sector_exposure TO ta_app_rw, ta_panel_rw, ta_ml_ro;
+
+-- =========================================================
+-- ACCOUNT CONSTRAINTS TABLE
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS core.account_constraints (
+    constraint_id               BIGSERIAL PRIMARY KEY,
+    account_id                 BIGINT NOT NULL UNIQUE REFERENCES core.accounts(account_id) ON DELETE CASCADE,
+    max_symbol_weight          NUMERIC(8, 4) NOT NULL DEFAULT 0.15,         -- 单票最大权重 15%
+    max_sector_weight          NUMERIC(8, 4) NOT NULL DEFAULT 0.30,         -- 行业最大权重 30%
+    min_cash_ratio             NUMERIC(8, 4) NOT NULL DEFAULT 0.05,         -- 最小现金比例 5%
+    max_new_positions_per_day  INTEGER NOT NULL DEFAULT 3,                    -- 单日最多新建仓数
+    allow_add_on_profit_only   BOOLEAN NOT NULL DEFAULT FALSE,              -- 仅盈利持仓才允许加仓
+    allow_add_on_loss          BOOLEAN NOT NULL DEFAULT FALSE,              -- 亏损持仓是否允许加仓
+    review_on_missing_balance  BOOLEAN NOT NULL DEFAULT TRUE,               -- 无余额快照时是否降为 REVIEW
+    is_active                 BOOLEAN NOT NULL DEFAULT TRUE,
+    metadata                  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT constraints_max_symbol_range CHECK (max_symbol_weight BETWEEN 0 AND 1),
+    CONSTRAINT constraints_max_sector_range CHECK (max_sector_weight BETWEEN 0 AND 1),
+    CONSTRAINT constraints_min_cash_range CHECK (min_cash_ratio BETWEEN 0 AND 1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_constraints_active ON core.account_constraints (account_id, is_active);
+
+DROP TRIGGER IF EXISTS trg_account_constraints_updated_at ON core.account_constraints;
+CREATE TRIGGER trg_account_constraints_updated_at
+BEFORE UPDATE ON core.account_constraints
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+COMMENT ON TABLE core.account_constraints IS '账户组合约束配置表';
+COMMENT ON COLUMN core.account_constraints.max_symbol_weight IS '单票最大权重（如 0.15 = 15%）';
+COMMENT ON COLUMN core.account_constraints.max_sector_weight IS '行业最大权重（如 0.30 = 30%）';
+COMMENT ON COLUMN core.account_constraints.min_cash_ratio IS '最小现金比例（如 0.05 = 5%）';
+
+-- Default constraints for paper_main and research_main
+INSERT INTO core.account_constraints (account_id, max_symbol_weight, max_sector_weight, min_cash_ratio, allow_add_on_profit_only, allow_add_on_loss, review_on_missing_balance)
+VALUES
+    (1, 0.20, 0.35, 0.05, FALSE, FALSE, TRUE)   -- paper_main: 20%单票/35%行业/5%现金底线
+ON CONFLICT (account_id) DO NOTHING;
+
+INSERT INTO core.account_constraints (account_id, max_symbol_weight, max_sector_weight, min_cash_ratio, allow_add_on_profit_only, allow_add_on_loss, review_on_missing_balance)
+VALUES
+    (2, 0.30, 0.50, 0.10, TRUE, FALSE, TRUE)    -- research_main: 宽松，30%单票/50%行业
+ON CONFLICT (account_id) DO NOTHING;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON core.account_constraints TO ta_app_rw, ta_panel_rw;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA core TO ta_app_rw, ta_panel_rw;
+GRANT SELECT ON core.account_constraints TO ta_ml_ro;
+
+COMMIT;
