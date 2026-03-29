@@ -410,6 +410,39 @@ CREATE INDEX IF NOT EXISTS idx_research_embeddings_symbol
     ON research.research_embeddings (symbol, created_at DESC);
 
 -- =========================================================
+-- ACCOUNT BALANCES (净值快照表)
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS core.account_balances (
+    balance_id          BIGSERIAL PRIMARY KEY,
+    account_id          BIGINT NOT NULL REFERENCES core.accounts(account_id) ON DELETE CASCADE,
+    as_of_date          DATE NOT NULL,
+    cash                NUMERIC(20, 2) NOT NULL DEFAULT 0,
+    available_cash      NUMERIC(20, 2) NOT NULL DEFAULT 0,
+    frozen_cash         NUMERIC(20, 2) NOT NULL DEFAULT 0,
+    market_value        NUMERIC(20, 2) NOT NULL DEFAULT 0,
+    total_equity        NUMERIC(20, 2) NOT NULL DEFAULT 0,
+    nav                 NUMERIC(20, 8),
+    total_units         NUMERIC(20, 8) DEFAULT NULL,
+    currency            TEXT NOT NULL DEFAULT 'CNY',
+    source              TEXT NOT NULL DEFAULT 'calculated',
+    metadata            JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT account_balances_unique UNIQUE (account_id, as_of_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ab_account_date ON core.account_balances (account_id, as_of_date DESC);
+CREATE INDEX IF NOT EXISTS idx_ab_date ON core.account_balances (as_of_date DESC);
+
+DROP TRIGGER IF EXISTS trg_ab_updated ON core.account_balances;
+CREATE TRIGGER trg_ab_updated
+BEFORE UPDATE ON core.account_balances
+FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+COMMENT ON TABLE core.account_balances IS '账户资金与净值快照，每日一记';
+
+-- =========================================================
 -- GRANTS
 -- =========================================================
 
@@ -428,6 +461,11 @@ GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA core, market, research TO
 GRANT SELECT ON ALL TABLES IN SCHEMA core, market, research TO ta_ml_ro;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA core, market, research TO ta_ml_ro;
 
+-- account_balances 权限
+GRANT SELECT, INSERT, UPDATE, DELETE ON core.account_balances TO ta_app_rw, ta_panel_rw;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA core TO ta_app_rw, ta_panel_rw;
+GRANT SELECT ON core.account_balances TO ta_ml_ro;
+
 -- Default privileges for future tables/sequences created by current owner
 ALTER DEFAULT PRIVILEGES IN SCHEMA core, market, research
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ta_app_rw, ta_panel_rw;
@@ -440,5 +478,46 @@ GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ta_app_rw, ta_panel_rw;
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA core, market, research
 GRANT USAGE, SELECT ON SEQUENCES TO ta_ml_ro;
+
+-- =========================================================
+-- LATEST POSITIONS VIEW（当前持仓视图）
+-- =========================================================
+DROP VIEW IF EXISTS core.v_latest_positions;
+CREATE VIEW core.v_latest_positions AS
+SELECT
+    p.position_id,
+    p.account_id,
+    a.account_code,
+    a.account_name,
+    p.symbol,
+    i.name            AS instrument_name,
+    i.exchange,
+    i.industry,
+    p.as_of_date      AS snapshot_date,
+    p.position_qty,
+    p.available_qty,
+    p.frozen_qty,
+    p.avg_cost,
+    p.last_price,
+    p.market_value,
+    p.unrealized_pnl,
+    p.weight,
+    p.source,
+    p.metadata,
+    CASE WHEN p.avg_cost > 0 AND p.last_price > 0
+         THEN ROUND((p.last_price - p.avg_cost) / p.avg_cost * 100, 4)
+         ELSE NULL END AS pnl_pct
+FROM core.positions p
+JOIN core.accounts a ON a.account_id = p.account_id
+JOIN core.instruments i ON i.symbol = p.symbol
+WHERE p.as_of_date = (
+    SELECT MAX(as_of_date)
+    FROM core.positions
+    WHERE account_id = p.account_id AND symbol = p.symbol
+);
+
+COMMENT ON VIEW core.v_latest_positions IS '当前持仓视图（取每个账户每个标的的最新快照）';
+
+GRANT SELECT ON core.v_latest_positions TO ta_app_rw, ta_panel_rw, ta_ml_ro;
 
 COMMIT;
