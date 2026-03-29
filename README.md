@@ -38,17 +38,17 @@ This fork adds first-class support for **Chinese A-share stocks** (沪深两市)
 - **MiniMax Endpoint** — Use MiniMax's Anthropic-compatible API as the LLM provider. Set `ANTHROPIC_BASE_URL=https://api.minimaxi.com/anthropic` and `ANTHROPIC_API_KEY=<your-key>` in `.env`. Works with existing `llm_provider: "anthropic"` config without code changes.
 - **Tushare Data Source** — Pull A-share financials (income, balance sheet, cash flow), dividends, and news via [Tushare Pro](https://tushare.pro/register). Set `TUSHARE_TOKEN` in `.env`. Registered in `tradingagents/dataflows/tushare_data.py` and routed through the standard dataflow interface.
 - **AKShare Data Source** — Pull A-share daily OHLCV, technical indicators (MACD, RSI, Bollinger Bands, etc.), and news via [AKShare](https://akshare.akfamily.xyz/). No API token required. Registered in `tradingagents/dataflows/akshare_data.py`.
-- **Stock Symbol Auto-fix** — LLM tool calls no longer lose the `.SZ` / `.SH` suffix (e.g. `002173` → `002173.SZ`).
+- **Stock Symbol Standard** — DB standard is `.SH` (Shanghai) / `.SZ` (Shenzhen). All data adapters normalize to this internally. `.SS` (Tushare legacy alias for Shanghai) is accepted as input and normalized to `.SH`.
 - **AnthropicClient base_url Fix** — `base_url` is now correctly propagated to the underlying HTTP client.
 - **Unified Entry (`tradingagents_runner/`)** — A command-line wrapper under `tradingagents_runner/run.py` with `analyze`, `batch`, `schedule`, and `alerter` modes. Run analysis with:
   ```bash
-  python /home/gulinyue/TradingAgents/tradingagents_runner/run.py analyze 002173.SZ 2026-03-29
+  python tradingagents_runner/run.py analyze 002173.SZ 2026-03-29
   ```
 
 Quick reference: see [QUICKREF.md](./QUICKREF.md).
 
 <div align="center">
-<a href="https://www.star-history.com/#TauricResearch/TradingAgents&Date">
+<a href="https://www.star-history.com/#Gulinyue/TradingAgents&Date">
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date&theme=dark" />
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date" />
@@ -115,9 +115,9 @@ Our framework decomposes complex trading tasks into specialized roles. This ensu
 
 ### Installation
 
-Clone TradingAgents:
+Clone this fork:
 ```bash
-git clone https://github.com/TauricResearch/TradingAgents.git
+git clone https://github.com/Gulinyue/TradingAgents.git
 cd TradingAgents
 ```
 

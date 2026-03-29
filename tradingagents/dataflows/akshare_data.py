@@ -12,7 +12,7 @@ import akshare as ak
 
 def _is_a_share(symbol: str) -> bool:
     """Heuristic: if symbol is pure 6-digit number, it's A-share."""
-    s = symbol.strip().replace('.SZ', '').replace('.SS', '').replace('.SZ', '')
+    s = symbol.strip().replace('.SZ', '').replace('.SH', '').replace('.SS', '')
     return s.isdigit() and len(s) == 6
 
 
@@ -29,7 +29,7 @@ def get_akshare_news(
     try:
         # Extract numeric part
         symbol_clean = symbol.strip().upper()
-        for suffix in ['.SZ', '.SS']:
+        for suffix in ['.SZ', '.SH', '.SS']:
             symbol_clean = symbol_clean.replace(suffix, '')
 
         df = ak.stock_news_em(symbol=symbol_clean)

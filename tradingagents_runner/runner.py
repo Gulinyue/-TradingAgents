@@ -12,7 +12,13 @@ from datetime import datetime, date
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv("/home/gulinyue/TradingAgents/.env")
+# Load .env from project root (set by ENV_FILE_PATH or default to script dir)
+env_path = os.environ.get("ENV_FILE_PATH")
+if env_path:
+    load_dotenv(env_path)
+else:
+    # Default: .env next to this script
+    load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 def get_default_config():
@@ -67,7 +73,7 @@ def analyze(
         config = get_default_config()
 
     if result_dir is None:
-        result_dir = Path("/home/gulinyue/TradingAgents/results")
+        result_dir = Path(__file__).parent.parent / "results"
     result_dir = Path(result_dir)
     result_dir.mkdir(parents=True, exist_ok=True)
 

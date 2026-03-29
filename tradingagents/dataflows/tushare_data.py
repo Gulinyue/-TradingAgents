@@ -18,7 +18,12 @@ def _get_pro():
     """Get or initialize Tushare Pro API."""
     global _pro_api
     if _pro_api is None:
-        load_dotenv('/home/gulinyue/TradingAgents/.env')
+        env_path = os.environ.get("ENV_FILE_PATH")
+        if env_path:
+            load_dotenv(env_path)
+        else:
+            from pathlib import Path
+            load_dotenv(Path(__file__).parent.parent.parent / ".env")
         token = os.environ.get('TUSHARE_TOKEN')
         if not token:
             raise RuntimeError("TUSHARE_TOKEN not set in .env")
@@ -27,22 +32,28 @@ def _get_pro():
 
 
 def _normalize_ts_code(symbol: str) -> str:
-    """Ensure symbol has .SZ or .SS suffix for A-shares."""
+    """Normalize A-share symbol to .SH / .SZ (DB internal standard).
+    
+    DB standard: .SH (Shanghai) / .SZ (Shenzhen)
+    Accepts input: .SH, .SZ, .SS (Tushare legacy alias for Shanghai)
+    """
     s = symbol.strip().upper()
     if '.' in s:
-        return s
+        # Already has suffix: normalize .SS -> .SH
+        return s.replace('.SS', '.SH')
     # Pure digit: infer exchange
     if s.isdigit():
         if len(s) == 6:
             if s.startswith('6'):
-                return f"{s}.SS"
+                return f"{s}.SH"
             else:
                 return f"{s}.SZ"
     return s
 
 
 def _is_a_share(ts_code: str) -> bool:
-    return ts_code.endswith('.SZ') or ts_code.endswith('.SS')
+    """Check if ts_code is an A-share (.SH or .SZ)."""
+    return ts_code.endswith('.SH') or ts_code.endswith('.SZ')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,7 +287,7 @@ def get_tushare_news(
             return "No news found via Tushare"
 
         # Filter news related to the stock
-        symbol_plain = ts_code.replace('.SZ', '').replace('.SS', '')
+        symbol_plain = ts_code.replace('.SZ', '').replace('.SH', '')
         related = df[df['content'].str.contains(symbol_plain, na=False)]
         if related.empty:
             return "No news found for this ticker in the specified period"
