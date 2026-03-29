@@ -1,0 +1,119 @@
+{
+  "ticker": "600036.SH",
+  "trade_date": "2026-03-29",
+  "account_code": "paper_main",
+  "watchlist_code": "core_holdings_focus",
+  "decision": "REVIEW",
+  "raw_decision": "REVIEW",
+  "confidence": null,
+  "risk_level": null,
+  "final_summary": "",
+  "overlay_reasons": [],
+  "hard_constraints_hit": [],
+  "soft_constraints_hit": [
+    "no_factors"
+  ],
+  "decision_rank_score": 0.35,
+  "candidate_bucket": "CANDIDATE",
+  "rank_reason": "软约束: no_factors",
+  "portfolio_context": {
+    "account_id": 1,
+    "account_code": "paper_main",
+    "account_name": "Paper Main Account",
+    "total_equity": 506460.0,
+    "portfolio_cash": 256190.0,
+    "total_market_value": 250270.0,
+    "nav": 1.01292,
+    "cash_ratio": 50.5844,
+    "cash_ratio_pct": 50.5844,
+    "market_weight_pct": 49.4156,
+    "as_of_date": "2026-03-29",
+    "constraints": {
+      "max_symbol_weight_pct": 20.0,
+      "max_sector_weight_pct": 35.0,
+      "min_cash_ratio_pct": 5.0,
+      "allow_add_on_profit_only": false,
+      "allow_add_on_loss": false,
+      "review_on_missing_balance": true
+    },
+    "is_held": false,
+    "current_position": null,
+    "position_qty": 0.0,
+    "current_weight_pct": 0.0,
+    "current_weight": 0.0,
+    "avg_cost": 0.0,
+    "last_price": 0.0,
+    "unrealized_pnl": 0.0,
+    "pnl_pct": 0.0,
+    "current_sector": null,
+    "current_industry": null,
+    "holding_symbols": [
+      "600519.SH",
+      "601318.SH",
+      "000001.SZ"
+    ],
+    "holding_count": 3,
+    "holding_sectors": [],
+    "holding_industries": [
+      "白酒",
+      "银行",
+      "保险"
+    ],
+    "same_sector_symbols": [
+      "600519.SH",
+      "601318.SH",
+      "000001.SZ"
+    ],
+    "same_industry_symbols": [],
+    "same_sector_count": 3,
+    "same_industry_count": 0,
+    "sector_allocation": {
+      "消费": 68.9455,
+      "金融": 31.0545
+    },
+    "current_sector_weight_pct": 0.0,
+    "hard_constraints_hit": [],
+    "is_symbol_overweight": false,
+    "is_sector_concentrated": false,
+    "is_cash_insufficient": false,
+    "soft_constraints_hit": [
+      "no_factors"
+    ],
+    "watchlist_code": "core_holdings_focus",
+    "watchlist_name": "核心持仓关注池",
+    "watchlist_tag": "candidate",
+    "watchlist_priority": 30,
+    "is_core_holding": false,
+    "watchlist_symbols": [
+      "600519.SH",
+      "300750.SZ",
+      "600036.SH"
+    ],
+    "data_completeness": {
+      "has_balance": true,
+      "has_bar": true,
+      "bar_count": 1,
+      "has_enough_bars": false,
+      "has_factors": false,
+      "has_prediction": false,
+      "has_constraints": true,
+      "review_required": false
+    },
+    "review_required": false,
+    "symbol": "600036.SH",
+    "trade_date": "2026-03-29"
+  },
+  "ta_result": {
+    "decision": "REVIEW",
+    "decision_score": "UNKNOWN",
+    "technical_report": "",
+    "fundamental_report": "",
+    "news_events": [],
+    "sentiment": "",
+    "risk_factors": [],
+    "analyst_signals": {},
+    "raw_full_report": ""
+  },
+  "analysis_run_id": 10,
+  "generated_at": "2026-03-29T17:47:41"
+}

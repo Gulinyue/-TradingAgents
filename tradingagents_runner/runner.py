@@ -412,12 +412,27 @@ def analyze(
     if write_db and research_repo and run_id:
         try:
             # 把质量评估写进 decision_json
+            # 注意：portfolio_context 中可能含 Decimal（来自 DB），需全部转为 float
+            def _deep_float(obj):
+                if isinstance(obj, dict):
+                    return {k: _deep_float(v) for k, v in obj.items()}
+                elif isinstance(obj, (list, tuple)):
+                    return [_deep_float(x) for x in obj]
+                elif isinstance(obj, float):
+                    return obj  # already float
+                elif isinstance(obj, (int, bool)):
+                    return obj  # int/bool keep as-is
+                elif hasattr(obj, "__float__"):  # Decimal 等
+                    return float(obj)
+                return obj
+
             enriched_decision_json = {
                 **decision_json,
                 "data_completeness": data_completeness,
                 "raw_output_quality": raw_output_quality,
                 "run_status": run_status,
             }
+            enriched_decision_json = _deep_float(enriched_decision_json)
 
             research_repo.insert_analysis_decision(
                 run_id=run_id,
