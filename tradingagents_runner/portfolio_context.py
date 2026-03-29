@@ -1,26 +1,246 @@
 """
-Portfolio Context Builder.
+Portfolio Context Builder - V2 语义层
 
-生成组合上下文，供 TradingAgents 分析使用。
-也包含组合修正层 apply_portfolio_overlay()。
+职责：把原始事实快照整理成决策可读对象，不产生 final_action。
+
+调用路径：
+  portfolio_snapshot.py → build_snapshot() [原始事实]
+  ↓
+  portfolio_context.py → build_context() [决策语义]
+  ↓
+  decision_policy.py → decide() [唯一决策出口]
+
+V1 兼容性：
+  build_portfolio_context() 保留，供 V1 模式（不传 account_code）降级使用。
 """
 import sys
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Resolve imports relative to project root
 _repo_root = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from repositories import (
-    AccountRepository,
-    WatchlistRepository,
-    MarketRepository,
-    normalize_db_symbol,
-)
 
+def build_context(
+    snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    把 portfolio_snapshot 的原始事实整理成决策语义对象。
+
+    参数
+    ----
+    snapshot : dict
+        build_snapshot() 的输出
+
+    返回
+    ----
+    dict（决策语义对象，供 decision_policy.py 使用）
+        - account_id / account_code / account_name
+        - balance: { total_equity, portfolio_cash, available_cash, nav, as_of_date }
+        - constraints: { max_symbol_weight, max_sector_weight, min_cash_ratio, ... }
+        - position: { is_held, qty, weight, avg_cost, last_price, unrealized_pnl, pnl_pct }
+        - holding: { count, symbols, sectors }
+        - sector_exposure: [{ sector, weight, holding_symbols }, ...]
+        - cash_ratio / market_weight
+        - is_core_holding / watchlist_tag / watchlist_priority
+        - data_completeness: { has_balance, has_bar, has_factors, review_required }
+        - is_sector_concentrated / is_symbol_overweight
+        - symbol / sector / trade_date
+    """
+    balance = snapshot.get("balance") or {}
+    constraints = snapshot.get("constraints") or {}
+    positions = snapshot.get("positions") or []
+    current_pos = snapshot.get("current_position")
+    sector_exp = snapshot.get("sector_exposure") or []
+    watchlist = snapshot.get("watchlist") or {}
+    watchlist_members = snapshot.get("watchlist_members") or []
+    watchlist_symbols = snapshot.get("watchlist_symbols") or []
+    data_comp = snapshot.get("data_completeness") or {}
+    symbol = snapshot.get("symbol", "")
+    trade_date = snapshot.get("trade_date")
+    account = snapshot.get("account") or {}
+
+    account_id = snapshot.get("account_id")
+    account_code = account.get("account_code") or ""
+    account_name = account.get("account_name") or ""
+
+    # ── 基础数值 ───────────────────────────────────────────────
+    total_equity = float(balance.get("total_equity") or 0)
+    portfolio_cash = float(balance.get("available_cash") or 0)
+    total_market_value = float(balance.get("market_value") or 0)
+    nav = float(balance.get("nav") or 1.0)
+    cash_ratio = (portfolio_cash / total_equity) if total_equity > 0 else 0.0
+    market_weight = 1.0 - cash_ratio
+
+    # ── 当前持仓 ────────────────────────────────────────────────
+    is_held = current_pos is not None and float(current_pos.get("position_qty") or 0) > 0
+    current_weight = (
+        float(current_pos.get("weight") or 0) if current_pos else 0.0
+    )
+    # weight 列是百分比数值（0.15 = 15%），不需要再除100
+    current_weight_pct = current_weight * 100 if current_weight <= 1 else current_weight
+    unrealized_pnl = float(current_pos.get("unrealized_pnl") or 0) if current_pos else 0.0
+    avg_cost = float(current_pos.get("avg_cost") or 0) if current_pos else 0.0
+    last_price = float(current_pos.get("last_price") or 0) if current_pos else 0.0
+    pnl_pct = (
+        round((last_price - avg_cost) / avg_cost * 100, 4)
+        if avg_cost > 0 and last_price > 0 else 0.0
+    )
+
+    # ── 持仓汇总 ────────────────────────────────────────────────
+    holding_symbols = [p["symbol"] for p in positions if float(p.get("position_qty") or 0) > 0]
+    holding_count = len(holding_symbols)
+    holding_sectors = {p.get("sector") for p in positions if p.get("sector")}
+    holding_industries = {p.get("industry") for p in positions if p.get("industry")}
+
+    # ── 当前股票所属行业 ────────────────────────────────────────
+    if current_pos:
+        current_sector = current_pos.get("sector")
+        current_industry = current_pos.get("industry")
+    else:
+        # 从持仓表反查
+        current_sector = None
+        current_industry = None
+        for p in positions:
+            if p["symbol"] == symbol:
+                current_sector = p.get("sector")
+                current_industry = p.get("industry")
+                break
+
+    # ── 同板块/行业持仓 ─────────────────────────────────────────
+    same_sector_symbols = [
+        p["symbol"] for p in positions
+        if p.get("sector") == current_sector and p["symbol"] != symbol
+    ]
+    same_industry_symbols = [
+        p["symbol"] for p in positions
+        if p.get("industry") == current_industry and p["symbol"] != symbol
+    ]
+
+    # ── 行业暴露 ────────────────────────────────────────────────
+    sector_allocation: Dict[str, float] = {}
+    for s in sector_exp:
+        sector_allocation[s["sector"]] = float(s["sector_weight_pct"])
+
+    # ── 约束命中检查（硬约束）────────────────────────────────────
+    max_symbol_w = float(constraints.get("max_symbol_weight") or 0.20)
+    max_sector_w = float(constraints.get("max_sector_weight") or 0.35)
+    min_cash_r = float(constraints.get("min_cash_ratio") or 0.05)
+
+    is_symbol_overweight = current_weight_pct >= (max_symbol_w * 100)
+    current_sector_w = sector_allocation.get(current_sector or "", 0.0) if current_sector else 0.0
+    is_sector_concentrated = current_sector_w >= (max_sector_w * 100)
+    is_cash_insufficient = cash_ratio < min_cash_r
+
+    # ── 股票池来源 ──────────────────────────────────────────────
+    watchlist_tag = None
+    watchlist_priority = None
+    is_core_holding = False
+
+    for m in watchlist_members:
+        if m["symbol"] == symbol:
+            watchlist_tag = m.get("tag")
+            watchlist_priority = m.get("priority")
+            is_core_holding = (
+                watchlist.get("watchlist_code") == "core_holdings_focus"
+                and watchlist_tag in ("holding", "core")
+            )
+            break
+
+    # ── 风险标记 ────────────────────────────────────────────────
+    hard_constraints_hit = []
+    if is_symbol_overweight:
+        hard_constraints_hit.append("symbol_overweight")
+    if is_sector_concentrated:
+        hard_constraints_hit.append("sector_concentrated")
+    if is_cash_insufficient:
+        hard_constraints_hit.append("cash_insufficient")
+
+    soft_constraints_hit = []
+    if data_comp.get("review_required"):
+        soft_constraints_hit.append("data_incomplete")
+    if data_comp.get("has_factors") is False:
+        soft_constraints_hit.append("no_factors")
+    if data_comp.get("has_bar") is False:
+        soft_constraints_hit.append("no_bar")
+    if data_comp.get("has_prediction"):
+        soft_constraints_hit.append("has_ml_prediction")
+
+    return {
+        # 账户
+        "account_id": account_id,
+        "account_code": account_code,
+        "account_name": account_name,
+        # 资金
+        "total_equity": total_equity,
+        "portfolio_cash": portfolio_cash,
+        "total_market_value": total_market_value,
+        "nav": nav,
+        "cash_ratio": round(cash_ratio * 100, 4),
+        "cash_ratio_pct": round(cash_ratio * 100, 4),
+        "market_weight_pct": round(market_weight * 100, 4),
+        "as_of_date": str(balance.get("as_of_date")) if balance.get("as_of_date") else None,
+        # 约束
+        "constraints": {
+            "max_symbol_weight_pct": round(max_symbol_w * 100, 4),
+            "max_sector_weight_pct": round(max_sector_w * 100, 4),
+            "min_cash_ratio_pct": round(min_cash_r * 100, 4),
+            "allow_add_on_profit_only": constraints.get("allow_add_on_profit_only", False),
+            "allow_add_on_loss": constraints.get("allow_add_on_loss", False),
+            "review_on_missing_balance": constraints.get("review_on_missing_balance", True),
+        },
+        # 当前持仓状态
+        "is_held": is_held,
+        "current_position": current_pos,
+        "position_qty": float(current_pos.get("position_qty") or 0) if current_pos else 0.0,
+        "current_weight_pct": round(current_weight_pct, 4),
+        "current_weight": round(current_weight, 8),
+        "avg_cost": avg_cost,
+        "last_price": last_price,
+        "unrealized_pnl": unrealized_pnl,
+        "pnl_pct": pnl_pct,
+        "current_sector": current_sector,
+        "current_industry": current_industry,
+        # 持仓汇总
+        "holding_symbols": holding_symbols,
+        "holding_count": holding_count,
+        "holding_sectors": list(holding_sectors),
+        "holding_industries": list(holding_industries),
+        # 同板块/行业
+        "same_sector_symbols": same_sector_symbols,
+        "same_industry_symbols": same_industry_symbols,
+        "same_sector_count": len(same_sector_symbols),
+        "same_industry_count": len(same_industry_symbols),
+        # 行业暴露
+        "sector_allocation": sector_allocation,
+        "current_sector_weight_pct": round(current_sector_w, 4),
+        # 硬约束命中
+        "hard_constraints_hit": hard_constraints_hit,
+        "is_symbol_overweight": is_symbol_overweight,
+        "is_sector_concentrated": is_sector_concentrated,
+        "is_cash_insufficient": is_cash_insufficient,
+        # 软约束命中
+        "soft_constraints_hit": soft_constraints_hit,
+        # 股票池来源
+        "watchlist_code": watchlist.get("watchlist_code"),
+        "watchlist_name": watchlist.get("name"),
+        "watchlist_tag": watchlist_tag,
+        "watchlist_priority": watchlist_priority,
+        "is_core_holding": is_core_holding,
+        "watchlist_symbols": watchlist_symbols,
+        # 数据完整性
+        "data_completeness": data_comp,
+        "review_required": bool(data_comp.get("review_required")),
+        # 分析标的
+        "symbol": symbol,
+        "trade_date": trade_date,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V1 兼容函数（不推荐新代码使用）
+# ─────────────────────────────────────────────────────────────────────────────
 
 def build_portfolio_context(
     account_code: str,
@@ -29,322 +249,15 @@ def build_portfolio_context(
     watchlist_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    生成单股分析的完整组合上下文。
-
-    参数
-    ----
-    account_code : str
-        账户代码，如 "paper_main"
-    symbol : str
-        分析标的，如 "600519.SH"（.SH/.SZ/.SS 均可，内部统一）
-    trade_date : str, optional
-        交易日期，格式 YYYY-MM-DD
-    watchlist_code : str, optional
-        指定股票池代码，若不传则从账户关联的默认池取
-
-    返回
-    ----
-    dict，包含：
-        - account: 账户基本信息
-        - balance: 最新资金快照
-        - positions: 全部持仓（不含当前股）
-        - current_position: 当前股持仓（如有）
-        - watchlists: 关联股票池
-        - portfolio_summary: 组合级统计
-        - is_held: 是否已持仓
-        - holding_symbols: 持仓代码列表
-        - same_sector_symbols: 同板块持仓代码
-        - same_industry_symbols: 同行业持仓代码
-        - sector_allocation: 行业分布
-        - watchlist_symbols: 股票池代码列表
+    V1 兼容接口，内部调用 build_snapshot + build_context。
+    保留向后兼容，不产生 final_action。
     """
-    ar = AccountRepository()
-    wr = WatchlistRepository()
+    from portfolio_snapshot import build_snapshot
 
-    symbol = normalize_db_symbol(symbol)
-
-    # ── 账户信息 ────────────────────────────────────────────────
-    account = ar.get_account_by_code(account_code)
-    if account is None:
-        raise ValueError(f"Account not found: {account_code}")
-
-    # ── 最新资金快照 ────────────────────────────────────────────
-    balance = _get_latest_balance(account_code)
-
-    # ── 当前股持仓 ──────────────────────────────────────────────
-    current_position = ar.get_latest_position_for_symbol(account_code, symbol)
-
-    # ── 全部持仓 ────────────────────────────────────────────────
-    all_positions = ar.get_latest_positions(account_code)
-
-    # ── 组合统计 ────────────────────────────────────────────────
-    holding_symbols = [p["symbol"] for p in all_positions]
-    is_held = current_position is not None and current_position.get("position_qty", 0) > 0
-
-    # 持仓市值 / 总权益
-    total_market_value = sum(
-        float(p.get("market_value") or 0) for p in all_positions
+    snapshot = build_snapshot(
+        account_code=account_code,
+        symbol=symbol,
+        trade_date=trade_date,
+        watchlist_code=watchlist_code,
     )
-    total_equity = float(balance.get("total_equity", 0)) if balance else 0.0
-    portfolio_cash = float(balance.get("available_cash", 0)) if balance else 0.0
-
-    # 同板块 / 同行业持仓
-    current_sector = current_position.get("sector") if current_position else None
-    current_industry = current_position.get("industry") if current_position else None
-
-    same_sector_symbols = []
-    same_industry_symbols = []
-    sector_allocation: Dict[str, float] = {}
-
-    for p in all_positions:
-        sym = p["symbol"]
-        sec = p.get("sector")
-        ind = p.get("industry")
-        mkt_val = float(p.get("market_value") or 0)
-        w = (mkt_val / total_market_value * 100) if total_market_value > 0 else 0.0
-
-        if sec:
-            sector_allocation[sec] = sector_allocation.get(sec, 0.0) + w
-
-        if sec and sec == current_sector and sym != symbol:
-            same_sector_symbols.append(sym)
-        if ind and ind == current_industry and sym != symbol:
-            same_industry_symbols.append(sym)
-
-    # ── 股票池 ─────────────────────────────────────────────────
-    watchlists: List[Dict[str, Any]] = []
-    watchlist_symbols: List[str] = []
-
-    if watchlist_code:
-        wl = wr.get_watchlist_by_code(watchlist_code)
-        members = wr.get_watchlist_members(watchlist_code)
-        if wl:
-            watchlists.append(wl)
-            watchlist_symbols = [m["symbol"] for m in members]
-    else:
-        # TODO: 从 account.metadata 读默认 watchlist_code，或遍历所有池
-        pass
-
-    # ── 拼接输出 ───────────────────────────────────────────────
-    return {
-        "account_code": account_code,
-        "account_name": account.get("account_name"),
-        "account_type": account.get("account_type"),
-        "base_currency": account.get("base_currency"),
-        # 资金
-        "total_equity": total_equity,
-        "portfolio_cash": portfolio_cash,
-        "total_market_value": total_market_value,
-        "nav": float(balance.get("nav", 0)) if balance else None,
-        "as_of_date": balance.get("as_of_date") if balance else None,
-        # 持仓状态
-        "is_held": is_held,
-        "current_position": current_position,
-        "holding_symbols": holding_symbols,
-        "holding_count": len(holding_symbols),
-        # 同板块/行业
-        "same_sector_symbols": same_sector_symbols,
-        "same_industry_symbols": same_industry_symbols,
-        "sector_allocation": sector_allocation,
-        # 股票池
-        "watchlists": watchlists,
-        "watchlist_symbols": watchlist_symbols,
-        "watchlist_code": watchlist_code,
-        # 分析标的
-        "symbol": symbol,
-        "trade_date": trade_date,
-        # 持仓权重（当前股）
-        "current_weight": (
-            float(current_position["market_value"]) / total_market_value * 100
-            if is_held and total_market_value > 0
-            else 0.0
-        ),
-    }
-
-
-def _get_latest_balance(account_code: str) -> Optional[Dict[str, Any]]:
-    """取账户最新资金快照，没有则返回 None。"""
-    sys.path.insert(0, str(Path(__file__).parent))
-    from db import get_conn
-    from psycopg2.extras import RealDictCursor
-
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT
-                    balance_id,
-                    account_id,
-                    as_of_date,
-                    cash,
-                    available_cash,
-                    frozen_cash,
-                    market_value,
-                    total_equity,
-                    nav,
-                    total_units,
-                    currency
-                FROM core.account_balances
-                WHERE account_id = (
-                    SELECT account_id FROM core.accounts WHERE account_code = %s
-                )
-                ORDER BY as_of_date DESC
-                LIMIT 1;
-                """,
-                (account_code,),
-            )
-            row = cur.fetchone()
-            return dict(row) if row else None
-
-
-def apply_portfolio_overlay(
-    raw_action: str,
-    raw_confidence: Optional[float],
-    raw_risk_level: Optional[str],
-    raw_summary: str,
-    raw_decision_json: Dict[str, Any],
-    portfolio_context: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    组合修正层：根据持仓上下文调整 TradingAgents 原始结论。
-
-    参数
-    ----
-    raw_action : str
-        TradingAgents 原始建议（BUY/SELL/HOLD 等）
-    raw_confidence : float, optional
-        原始置信度
-    raw_risk_level : str, optional
-        原始风险等级（LOW/MEDIUM/HIGH/CRITICAL）
-    raw_summary : str
-        原始摘要文本
-    raw_decision_json : dict
-        原始决策 JSON（含分析理由等）
-    portfolio_context : dict
-        build_portfolio_context() 输出
-
-    返回
-    ----
-    dict，包含修正后的：
-        - action, confidence, risk_level, summary
-        - overlay_reason: 修正原因
-        - final_summary: 最终摘要
-    """
-    symbol = portfolio_context.get("symbol", "")
-    is_held = portfolio_context.get("is_held", False)
-    current_qty = (
-        float(portfolio_context.get("current_position", {}).get("position_qty") or 0)
-        if portfolio_context.get("current_position")
-        else 0.0
-    )
-    same_sector = portfolio_context.get("same_sector_symbols", [])
-    same_industry = portfolio_context.get("same_industry_symbols", [])
-    sector_alloc: Dict[str, float] = portfolio_context.get("sector_allocation", {})
-
-    # 原始值
-    final_action = raw_action
-    final_confidence = raw_confidence
-    final_risk_level = raw_risk_level
-    overlay_reason = ""
-    notes: List[str] = []
-
-    # ── 规则 1：已持仓 + 原始偏多 → BUY 转 ADD/HOLD ─────────────
-    if is_held and raw_action == "BUY":
-        if current_qty > 0:
-            final_action = "ADD"
-            overlay_reason = "already_held"
-            notes.append(f"已在仓 (qty={current_qty:.0f})，BUY 修正为 ADD")
-
-    # ── 规则 2：已持仓 + 原始中性 → 维持 HOLD ──────────────────
-    if is_held and raw_action in ("BUY", "HOLD"):
-        # HOLD 本身就是最优，继续
-        overlay_reason = overlay_reason or ("already_held" if is_held else "")
-        if raw_action == "BUY" and current_qty > 0:
-            final_action = "ADD"
-            notes.append(f"已在仓，BUY → ADD")
-
-    # ── 规则 3：未持仓 + 同板块重仓 → BUY 转 REVIEW ─────────────
-    if not is_held and raw_action == "BUY":
-        # 行业集中度检查：同行业持仓 > 30%
-        industry_symbols = same_industry
-        if industry_symbols:
-            max_industry_w = max(
-                sector_alloc.get(
-                    portfolio_context.get("current_position", {}).get("industry") or "", 0.0
-                )
-                for _ in [1]
-            )
-            # 简单版：同板块已有票 → REVIEW
-            if same_sector:
-                final_action = "REVIEW"
-                overlay_reason = "sector_concentration"
-                notes.append(
-                    f"同板块已有持仓 {same_sector}，BUY 降为 REVIEW 谨慎评估"
-                )
-            elif industry_symbols:
-                final_action = "REVIEW"
-                overlay_reason = "industry_concentration"
-                notes.append(
-                    f"同行业已有持仓 {industry_symbols}，BUY 降为 REVIEW"
-                )
-
-    # ── 规则 4：已持仓 + 原始偏空 → 维持但降级 ─────────────────
-    if is_held and raw_action == "SELL":
-        # SELL 在持仓情况下等价于 TRIM 或 EXIT
-        if current_qty > 0:
-            final_action = "TRIM"
-            overlay_reason = "reduce_existing_position"
-            notes.append(f"已有仓位，原始 SELL 修正为 TRIM")
-
-    # ── 规则 5：原始建议中性且已有盈利仓位 → 倾向 HOLD ─────────
-    if is_held and raw_action == "HOLD":
-        unrealized = float(
-            portfolio_context.get("current_position", {}).get("unrealized_pnl") or 0
-        )
-        if unrealized > 0:
-            notes.append(f"持仓已盈利 ¥{unrealized:.2f}，维持 HOLD")
-        overlay_reason = overlay_reason or ("existing_profitable_holding" if unrealized > 0 else "")
-
-    # ── 规则 6：来自核心持仓关注池 → 摘要注明 ───────────────────
-    in_core_pool = (
-        symbol in portfolio_context.get("watchlist_symbols", [])
-        and portfolio_context.get("watchlist_code") == "core_holdings_focus"
-    )
-    if in_core_pool:
-        notes.append("来自核心持仓关注池")
-
-    # ── 汇总 final_summary ─────────────────────────────────────
-    if notes:
-        final_summary = raw_summary
-        if raw_summary and not raw_summary.endswith("。"):
-            raw_summary += "。"
-        final_summary = raw_summary + " [组合修正] " + "；".join(notes)
-    else:
-        final_summary = raw_summary
-
-    # ── 风险等级修正 ────────────────────────────────────────────
-    # 已持仓 + 同板块 → 风险升一级
-    if is_held and same_sector and final_risk_level in (None, "LOW"):
-        final_risk_level = "MEDIUM"
-        notes.append("同板块已有持仓，风险升为 MEDIUM")
-
-    return {
-        "action": final_action,
-        "confidence": final_confidence,
-        "risk_level": final_risk_level,
-        "overlay_reason": overlay_reason,
-        "final_summary": final_summary,
-        "decision_json": {
-            **raw_decision_json,
-            "overlay_applied": True,
-            "overlay_rules": notes,
-            "portfolio_context": {
-                "is_held": is_held,
-                "current_qty": current_qty,
-                "same_sector_symbols": same_sector,
-                "same_industry_symbols": same_industry,
-                "watchlist_code": portfolio_context.get("watchlist_code"),
-                "watchlist_symbols": portfolio_context.get("watchlist_symbols"),
-            },
-        },
-    }
+    return build_context(snapshot)
