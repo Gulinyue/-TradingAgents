@@ -233,3 +233,4 @@ pg18_data/
 # Local overrides
 .env.local
 .env.production
+eval_results/
