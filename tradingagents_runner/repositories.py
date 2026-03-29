@@ -503,3 +503,114 @@ class ResearchRepository(BaseRepository):
             sql,
             (runtime_ms, error_message, runtime_meta_json, runtime_meta_json, run_id),
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V2: AccountSnapshotRepository
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AccountSnapshotRepository(BaseRepository):
+    """
+    V2 专用：读取组合快照视图，不做写操作。
+    """
+
+    def get_latest_account_balance(self, account_code: str) -> Optional[Dict[str, Any]]:
+        """直接从视图取最新余额快照。"""
+        sql = """
+        SELECT *
+        FROM core.v_latest_account_balance
+        WHERE account_code = %s;
+        """
+        return self._fetch_one(sql, (account_code,))
+
+    def get_account_constraints(self, account_code: str) -> Optional[Dict[str, Any]]:
+        """取账户约束配置。"""
+        sql = """
+        SELECT c.*
+        FROM core.account_constraints c
+        JOIN core.accounts a ON a.account_id = c.account_id
+        WHERE a.account_code = %s
+          AND c.is_active = TRUE
+        LIMIT 1;
+        """
+        return self._fetch_one(sql, (account_code,))
+
+    def get_portfolio_snapshot(self, account_code: str) -> Optional[Dict[str, Any]]:
+        """取账户组合汇总快照（余额+持仓统计）。"""
+        sql = """
+        SELECT *
+        FROM core.v_account_portfolio_snapshot
+        WHERE account_code = %s;
+        """
+        return self._fetch_one(sql, (account_code,))
+
+    def get_sector_exposure(self, account_code: str) -> List[Dict[str, Any]]:
+        """取账户行业暴露列表。"""
+        sql = """
+        SELECT *
+        FROM core.v_sector_exposure
+        WHERE account_code = %s
+        ORDER BY sector_weight_pct DESC;
+        """
+        return self._fetch_all(sql, (account_code,))
+
+    def get_sector_for_symbol(self, symbol: str) -> Optional[str]:
+        """取股票所属行业。"""
+        sql = """
+        SELECT sector FROM core.instruments WHERE symbol = %s LIMIT 1;
+        """
+        row = self._fetch_one(sql, (normalize_db_symbol(symbol),))
+        return row["sector"] if row else None
+
+    def get_sector_weight(self, account_code: str, sector: str) -> float:
+        """取账户在指定行业的暴露权重。"""
+        sql = """
+        SELECT sector_weight_pct
+        FROM core.v_sector_exposure
+        WHERE account_code = %s AND sector = %s
+        LIMIT 1;
+        """
+        row = self._fetch_one(sql, (account_code, sector))
+        return float(row["sector_weight_pct"]) if row else 0.0
+
+    def get_symbol_weight(self, account_code: str, symbol: str) -> float:
+        """取账户指定股票的权重。"""
+        symbol = normalize_db_symbol(symbol)
+        sql = """
+        SELECT weight
+        FROM core.v_latest_positions
+        WHERE account_code = %s AND symbol = %s
+        LIMIT 1;
+        """
+        row = self._fetch_one(sql, (account_code, symbol))
+        return float(row["weight"]) if row and row.get("weight") is not None else 0.0
+
+
+class ResearchV2Repository(BaseRepository):
+    """V2 扩展：研究层新增读取方法。"""
+
+    def get_latest_model_prediction(
+        self,
+        symbol: str,
+        account_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """取最新 ML 模型预测。"""
+        symbol = normalize_db_symbol(symbol)
+        if account_id:
+            sql = """
+            SELECT *
+            FROM research.model_predictions
+            WHERE symbol = %s AND account_id = %s
+            ORDER BY prediction_date DESC, created_at DESC
+            LIMIT 1;
+            """
+            return self._fetch_one(sql, (symbol, account_id))
+        else:
+            sql = """
+            SELECT *
+            FROM research.model_predictions
+            WHERE symbol = %s
+            ORDER BY prediction_date DESC, created_at DESC
+            LIMIT 1;
+            """
+            return self._fetch_one(sql, (symbol,))
