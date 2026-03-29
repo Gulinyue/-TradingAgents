@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg18
+    container_name: pg18-ta
+    restart: unless-stopped
+    ports:
+      - "6543:5432"
+    environment:
+      POSTGRES_DB: tradingagents
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:?please set DB_POSTGRES_PASSWORD}
+    volumes:
+      - pg18_data:/var/lib/postgresql/data
+      - ./schema_v1.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # 启动后手动安装 pgvector（如镜像未内置）:
+  # docker exec pg18-ta apk add --no-cache postgresql18-dev gcc musl-dev make git
+  # docker exec pg18-ta sh -c "git clone --branch v0.8.2 https://github.com/pgvector/pgvector.git /tmp/pgvector && cd /tmp/pgvector && make && make install"
+  # docker exec pg18-ta psql -U postgres -d tradingagents -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+  # 修改默认账号密码（启动后执行）:
+  # docker exec pg18-ta psql -U postgres -d tradingagents -c "ALTER ROLE ta_app_rw WITH PASSWORD 'your_new_password';"
+  # docker exec pg18-ta psql -U postgres -d tradingagents -c "ALTER ROLE ta_panel_rw WITH PASSWORD 'your_new_password';"
+  # docker exec pg18-ta psql -U postgres -d tradingagents -c "ALTER ROLE ta_ml_ro WITH PASSWORD 'your_new_password';"
+
+volumes:
+  pg18_data:

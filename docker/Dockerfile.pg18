@@ -1,0 +1,22 @@
+FROM postgres:18
+
+# TimescaleDB apt repo
+RUN apt-get update && apt-get install -y gnupg lsb-release curl
+
+# Add PostgreSQL official GPG key
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+
+# Add TimescaleDB repo
+RUN echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://packagecloud.io/timescale/timescaledb/ubuntu $(lsb_release -cs) main" > /etc/apt/sources.list.d/timescaledb.list
+
+# Update and install TimescaleDB + pgvector
+RUN apt-get update && apt-get install -y \
+    timescaledb-18-postgresql-18 \
+    postgresql-18-pgvector \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Initialize with extension
+COPY init.sql /docker-entrypoint-initdb.d/01-timescaledb.sql
+
+ENV POSTGRES_HOST_AUTH_METHOD=trust
