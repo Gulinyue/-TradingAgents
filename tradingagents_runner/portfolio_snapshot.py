@@ -133,9 +133,12 @@ def build_snapshot(
     latest_prediction = research_repo.get_latest_model_prediction(symbol, account_id)
 
     # ── 数据完整性标记 ────────────────────────────────────────
+    bar_count = market_repo.get_bar_count(symbol)
     data_completeness = {
         "has_balance": balance is not None,
         "has_bar": latest_bar is not None,
+        "bar_count": bar_count,
+        "has_enough_bars": bar_count >= 20,       # 20条以上才能支撑基础技术指标
         "has_factors": len(latest_factors) > 0,
         "has_prediction": latest_prediction is not None,
         "has_constraints": constraints.get("max_symbol_weight", 0) > 0,
@@ -156,6 +159,7 @@ def build_snapshot(
         "watchlist_members": watchlist_members,
         "watchlist_symbols": watchlist_symbols,
         "latest_bar": latest_bar,
+        "bar_count": bar_count,
         "latest_factors": latest_factors,
         "latest_prediction": latest_prediction,
         "data_completeness": data_completeness,

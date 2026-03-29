@@ -277,7 +277,6 @@ class WatchlistRepository(BaseRepository):
         return [r["symbol"] for r in rows]
 
 
-class MarketRepository(BaseRepository):
     def get_latest_bar(self, symbol: str) -> Optional[Dict[str, Any]]:
         symbol = normalize_db_symbol(symbol)
 
@@ -328,6 +327,93 @@ class MarketRepository(BaseRepository):
             """
             return self._fetch_all(sql, (symbol, trade_date))
 
+        sql = """
+        WITH latest_dt AS (
+            SELECT MAX(trade_date) AS trade_date
+            FROM market.factor_values
+            WHERE symbol = %s
+        )
+        SELECT
+            f.symbol,
+            f.trade_date,
+            f.factor_name,
+            f.factor_value,
+            f.factor_version,
+            f.source,
+            f.extra
+        FROM market.factor_values f
+        JOIN latest_dt ld
+          ON ld.trade_date = f.trade_date
+        WHERE f.symbol = %s
+        ORDER BY f.factor_name ASC;
+        """
+        return self._fetch_all(sql, (symbol, symbol))
+
+    def get_latest_factors_as_dict(
+        self,
+        symbol: str,
+        trade_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        rows = self.get_latest_factors(symbol, trade_date)
+        return {row["factor_name"]: row["factor_value"] for row in rows}
+
+
+class MarketRepository(BaseRepository):
+    def get_bar_count(self, symbol: str) -> int:
+        symbol = normalize_db_symbol(symbol)
+        result = self._fetch_one(
+            "SELECT COUNT(*) AS cnt FROM market.market_bars_daily WHERE symbol = %s",
+            (symbol,),
+        )
+        return int(result["cnt"]) if result else 0
+
+    def get_latest_bar(self, symbol: str) -> Optional[Dict[str, Any]]:
+        symbol = normalize_db_symbol(symbol)
+        sql = """
+        SELECT
+            b.symbol,
+            i.name,
+            b.trade_date,
+            b.open,
+            b.high,
+            b.low,
+            b.close,
+            b.volume,
+            b.amount,
+            b.adj_factor,
+            b.source,
+            b.extra
+        FROM market.market_bars_daily b
+        JOIN core.instruments i
+          ON i.symbol = b.symbol
+        WHERE b.symbol = %s
+        ORDER BY b.trade_date DESC
+        LIMIT 1;
+        """
+        return self._fetch_one(sql, (symbol,))
+
+    def get_latest_factors(
+        self,
+        symbol: str,
+        trade_date: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        symbol = normalize_db_symbol(symbol)
+        if trade_date:
+            sql = """
+            SELECT
+                f.symbol,
+                f.trade_date,
+                f.factor_name,
+                f.factor_value,
+                f.factor_version,
+                f.source,
+                f.extra
+            FROM market.factor_values f
+            WHERE f.symbol = %s
+              AND f.trade_date = %s
+            ORDER BY f.factor_name ASC;
+            """
+            return self._fetch_all(sql, (symbol, trade_date))
         sql = """
         WITH latest_dt AS (
             SELECT MAX(trade_date) AS trade_date
@@ -476,6 +562,40 @@ class ResearchRepository(BaseRepository):
         """
         runtime_meta_json = json.dumps(runtime_meta) if runtime_meta is not None else None
         self._execute(sql, (runtime_ms, runtime_meta_json, runtime_meta_json, run_id))
+
+    def update_run_status(
+        self,
+        run_id: int,
+        status: str,
+        *,
+        runtime_ms: Optional[int] = None,
+        runtime_meta: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """
+        更新 run 状态，支持三种值：
+          success  - 链路完整，TA 输出质量达标
+          partial  - 链路完整，但数据不完整或 TA 输出退化
+          failed   - 链路未完成，或关键写库失败
+        """
+        sql = """
+        UPDATE research.analysis_runs
+        SET
+            status = %s,
+            finished_at = NOW(),
+            runtime_ms = COALESCE(%s, runtime_ms),
+            error_message = COALESCE(%s, error_message),
+            runtime_meta = CASE
+                WHEN %s IS NULL THEN runtime_meta
+                ELSE COALESCE(runtime_meta, '{}'::jsonb) || %s::jsonb
+            END
+        WHERE run_id = %s;
+        """
+        runtime_meta_json = json.dumps(runtime_meta) if runtime_meta is not None else None
+        self._execute(
+            sql,
+            (status, runtime_ms, error_message, runtime_meta_json, runtime_meta_json, run_id),
+        )
 
     def mark_run_failed(
         self,

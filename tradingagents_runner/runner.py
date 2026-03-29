@@ -364,9 +364,61 @@ def analyze(
             "ta_result": ta_result,
         }
 
+    # ── V2 质量评估 ───────────────────────────────────────────
+    # data_completeness（来自 portfolio_snapshot）
+    snap = portfolio_snapshot if "portfolio_snapshot" in dir() else {}
+    dc = (snap.get("data_completeness") or {}) if snap else {}
+    bar_count = dc.get("bar_count", 0)
+
+    data_completeness = {
+        "has_enough_bars": bar_count >= 20,
+        "bar_count": bar_count,
+        "has_balance": dc.get("has_balance", False),
+        "has_factors": dc.get("has_factors", False),
+        "has_prediction": dc.get("has_prediction", False),
+    }
+
+    # raw_output_quality（来自 TA 原始输出）
+    raw_output_quality = {
+        "raw_confidence_present": confidence is not None,
+        "raw_risk_present": risk_level is not None,
+        "technical_report_nonempty": bool(ta_result.get("technical_report", "").strip()),
+        "fundamental_report_nonempty": bool(ta_result.get("fundamental_report", "").strip()),
+        "raw_decision_score_known": ta_result.get("decision_score", "") not in ("", "UNKNOWN"),
+        "ta_decision_nondefault": raw_action not in ("REVIEW", "UNKNOWN", ""),
+    }
+
+    # 三元状态判断
+    # success: TA 输出质量达标（报告非空 + 置信度存在）
+    # partial: 链路完整但 TA 输出退化（数据不足或质量差）
+    # failed: 链路未完成（TA propagate 直接抛异常在上面已处理）
+    ta_is_healthy = (
+        raw_output_quality["technical_report_nonempty"]
+        and raw_output_quality["fundamental_report_nonempty"]
+        and raw_output_quality["raw_confidence_present"]
+    )
+    data_is_enough = (
+        data_completeness["has_enough_bars"]
+        and data_completeness["has_balance"]
+    )
+    if ta_is_healthy and data_is_enough:
+        run_status = "success"
+    elif not ta_is_healthy or not data_completeness["has_balance"]:
+        run_status = "partial"
+    else:
+        run_status = "partial"  # 缺数据但链路完整，都算 partial
+
     # ── 写 DB ─────────────────────────────────────────────────
     if write_db and research_repo and run_id:
         try:
+            # 把质量评估写进 decision_json
+            enriched_decision_json = {
+                **decision_json,
+                "data_completeness": data_completeness,
+                "raw_output_quality": raw_output_quality,
+                "run_status": run_status,
+            }
+
             research_repo.insert_analysis_decision(
                 run_id=run_id,
                 symbol=ticker,
@@ -377,18 +429,24 @@ def analyze(
                 score=decision_rank_score,
                 rationale=ta_result.get("fundamental_report", ""),
                 summary=final_summary,
-                decision_json=decision_json,
+                decision_json=enriched_decision_json,
             )
-            research_repo.mark_run_success(
+
+            runtime_meta_final = {
+                "overlay_reasons": overlay_reasons,
+                "hard_constraints_hit": hard_constraints_hit,
+                "soft_constraints_hit": soft_constraints_hit,
+                "candidate_bucket": candidate_bucket,
+                "decision_rank_score": decision_rank_score,
+                "data_completeness": data_completeness,
+                "raw_output_quality": raw_output_quality,
+                "run_status": run_status,
+            }
+            research_repo.update_run_status(
                 run_id,
+                run_status,
                 runtime_ms=ta_elapsed_ms,
-                runtime_meta={
-                    "overlay_reasons": overlay_reasons,
-                    "hard_constraints_hit": hard_constraints_hit,
-                    "soft_constraints_hit": soft_constraints_hit,
-                    "candidate_bucket": candidate_bucket,
-                    "decision_rank_score": decision_rank_score,
-                },
+                runtime_meta=runtime_meta_final,
             )
         except Exception as e:
             # DB 写回失败，打印警告但不阻断返回
@@ -398,6 +456,14 @@ def analyze(
     if save_local_artifacts and save_result:
         result_dir.mkdir(parents=True, exist_ok=True)
         out_file = result_dir / f"{ticker.replace('.', '_')}_{trade_date}.json"
+
+        def _json_default(o):
+            """处理 date/datetime 等非 JSON 类型."""
+            import datetime
+            if isinstance(o, (datetime.date, datetime.datetime)):
+                return o.isoformat()
+            raise TypeError(f"{o.__class__.__name__} is not JSON serializable")
+
         out_file.write_text(
             json.dumps({
                 "ticker": ticker,
@@ -419,7 +485,7 @@ def analyze(
                 "ta_result": ta_result,
                 "analysis_run_id": run_id,
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }, ensure_ascii=False, indent=2),
+            }, ensure_ascii=False, indent=2, default=_json_default),
             encoding="utf-8",
         )
 
