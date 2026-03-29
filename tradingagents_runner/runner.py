@@ -209,13 +209,16 @@ def analyze(
 
     if account_code and write_db:
         try:
-            from repositories import AccountRepository, ResearchRepository
-            from portfolio_context import build_portfolio_context, apply_portfolio_overlay
+            from repositories import ResearchRepository
+            from portfolio_snapshot import build_snapshot
+            from portfolio_context import build_context
+            from decision_policy import decide
 
-            account_repo = AccountRepository()
             research_repo = ResearchRepository()
 
             # 取 account_id
+            from repositories import AccountRepository
+            account_repo = AccountRepository()
             account = account_repo.get_account_by_code(account_code)
             account_id = account["account_id"] if account else None
 
@@ -226,13 +229,14 @@ def analyze(
                 wl = WatchlistRepository().get_watchlist_by_code(watchlist_code)
                 watchlist_id = wl["watchlist_id"] if wl else None
 
-            # 构建组合上下文
-            portfolio_context = build_portfolio_context(
+            # V2 三阶段链：snapshot → context → decide
+            portfolio_snapshot = build_snapshot(
                 account_code=account_code,
                 symbol=ticker,
                 trade_date=trade_date,
                 watchlist_code=watchlist_code,
             )
+            portfolio_context = build_context(portfolio_snapshot)
 
             # 写 analysis_run（先占位）
             runtime_meta = {
@@ -240,11 +244,16 @@ def analyze(
                 "model": config.get("deep_think_llm"),
                 "account_code": account_code,
                 "watchlist_code": watchlist_code,
-                "portfolio_context_snapshot": {
+                "portfolio_snapshot": {
                     "is_held": portfolio_context.get("is_held"),
                     "total_equity": portfolio_context.get("total_equity"),
                     "portfolio_cash": portfolio_context.get("portfolio_cash"),
                     "holding_count": portfolio_context.get("holding_count"),
+                    "cash_ratio_pct": portfolio_context.get("cash_ratio_pct"),
+                    "sector_allocation": portfolio_context.get("sector_allocation"),
+                    "hard_constraints_hit": portfolio_context.get("hard_constraints_hit"),
+                    "soft_constraints_hit": portfolio_context.get("soft_constraints_hit"),
+                    "is_core_holding": portfolio_context.get("is_core_holding"),
                 },
             }
 
@@ -297,11 +306,11 @@ def analyze(
     # ── 解析 TA 原始结果 ────────────────────────────────────────
     ta_result = _parse_ta_result(ticker, trade_date)
 
-    # ── 组合修正 ────────────────────────────────────────────────
+    # ── V2 三阶段：组合约束决策 ─────────────────────────────────
     if portfolio_context:
-        from portfolio_context import apply_portfolio_overlay
+        from decision_policy import decide
 
-        overlay_result = apply_portfolio_overlay(
+        policy_result = decide(
             raw_action=raw_action,
             raw_confidence=ta_result.get("confidence"),
             raw_risk_level=ta_result.get("risk_level"),
@@ -310,24 +319,50 @@ def analyze(
                 "ta_decision": raw_action,
                 "ta_result": ta_result,
             },
-            portfolio_context=portfolio_context,
+            portfolio_ctx=portfolio_context,
         )
-        final_action = overlay_result["action"]
-        final_summary = overlay_result["final_summary"]
-        overlay_reason = overlay_result["overlay_reason"]
-        decision_json = overlay_result["decision_json"]
+        final_action = policy_result["final_action"]
+        raw_action_out = policy_result["raw_action"]
         confidence = ta_result.get("confidence")
         risk_level = ta_result.get("risk_level")
+        decision_rank_score = policy_result["decision_rank_score"]
+        candidate_bucket = policy_result["candidate_bucket"]
+        overlay_reasons = policy_result["overlay_reasons"]
+        hard_constraints_hit = policy_result["hard_constraints_hit"]
+        soft_constraints_hit = policy_result["soft_constraints_hit"]
+        rank_reason = policy_result["rank_reason"]
+        final_summary = ta_result.get("final_summary", ta_result.get("technical_report", ""))
+        decision_json = {
+            **policy_result,
+            "ta_decision": raw_action,
+            "ta_result": ta_result,
+            "portfolio_snapshot": {
+                "is_held": portfolio_context.get("is_held"),
+                "total_equity": portfolio_context.get("total_equity"),
+                "portfolio_cash": portfolio_context.get("portfolio_cash"),
+                "cash_ratio_pct": portfolio_context.get("cash_ratio_pct"),
+                "current_weight_pct": portfolio_context.get("current_weight_pct"),
+                "hard_constraints_hit": hard_constraints_hit,
+                "soft_constraints_hit": soft_constraints_hit,
+                "is_core_holding": portfolio_context.get("is_core_holding"),
+            },
+        }
     else:
         final_action = raw_action
+        raw_action_out = raw_action
         final_summary = ta_result.get("technical_report", ta_result.get("fundamental_report", ""))
-        overlay_reason = ""
+        confidence = ta_result.get("confidence")
+        risk_level = ta_result.get("risk_level")
+        decision_rank_score = None
+        candidate_bucket = None
+        overlay_reasons = []
+        hard_constraints_hit = []
+        soft_constraints_hit = []
+        rank_reason = ""
         decision_json = {
             "ta_decision": raw_action,
             "ta_result": ta_result,
         }
-        confidence = ta_result.get("confidence")
-        risk_level = ta_result.get("risk_level")
 
     # ── 写 DB ─────────────────────────────────────────────────
     if write_db and research_repo and run_id:
@@ -339,7 +374,7 @@ def analyze(
                 action=final_action,
                 confidence=confidence,
                 risk_level=risk_level,
-                score=None,
+                score=decision_rank_score,
                 rationale=ta_result.get("fundamental_report", ""),
                 summary=final_summary,
                 decision_json=decision_json,
@@ -347,7 +382,13 @@ def analyze(
             research_repo.mark_run_success(
                 run_id,
                 runtime_ms=ta_elapsed_ms,
-                runtime_meta={"overlay_reason": overlay_reason},
+                runtime_meta={
+                    "overlay_reasons": overlay_reasons,
+                    "hard_constraints_hit": hard_constraints_hit,
+                    "soft_constraints_hit": soft_constraints_hit,
+                    "candidate_bucket": candidate_bucket,
+                    "decision_rank_score": decision_rank_score,
+                },
             )
         except Exception as e:
             # DB 写回失败，打印警告但不阻断返回
@@ -364,11 +405,16 @@ def analyze(
                 "account_code": account_code,
                 "watchlist_code": watchlist_code,
                 "decision": final_action,
-                "raw_decision": raw_action,
+                "raw_decision": raw_action_out,
                 "confidence": confidence,
                 "risk_level": risk_level,
                 "final_summary": final_summary,
-                "overlay_reason": overlay_reason,
+                "overlay_reasons": overlay_reasons,
+                "hard_constraints_hit": hard_constraints_hit,
+                "soft_constraints_hit": soft_constraints_hit,
+                "decision_rank_score": decision_rank_score,
+                "candidate_bucket": candidate_bucket,
+                "rank_reason": rank_reason,
                 "portfolio_context": portfolio_context,
                 "ta_result": ta_result,
                 "analysis_run_id": run_id,
@@ -383,11 +429,16 @@ def analyze(
         "account_code": account_code,
         "watchlist_code": watchlist_code,
         "decision": final_action,
-        "raw_decision": raw_action,
+        "raw_decision": raw_action_out,
         "confidence": confidence,
         "risk_level": risk_level,
         "final_summary": final_summary,
-        "overlay_reason": overlay_reason,
+        "overlay_reasons": overlay_reasons,
+        "hard_constraints_hit": hard_constraints_hit,
+        "soft_constraints_hit": soft_constraints_hit,
+        "decision_rank_score": decision_rank_score,
+        "candidate_bucket": candidate_bucket,
+        "rank_reason": rank_reason,
         "portfolio_context": portfolio_context,
         "analysis_run_id": run_id,
         "ta_result": ta_result,
@@ -422,21 +473,29 @@ def quick_summary(result: dict) -> str:
         f"{'─' * 20}",
         f"🎯 最终决策：{result['decision']}",
         f"   原始信号：{result.get('raw_decision', 'N/A')}",
+        f"   候选桶：{result.get('candidate_bucket', 'N/A')}",
     ]
-    if result.get("overlay_reason"):
-        lines.append(f"   组合修正：{result['overlay_reason']}")
+    if result.get("decision_rank_score") is not None:
+        lines.append(f"   排序分数：{result['decision_rank_score']:.4f}")
+    if result.get("hard_constraints_hit"):
+        lines.append(f"   ⚠️ 硬约束：{', '.join(result['hard_constraints_hit'])}")
+    if result.get("soft_constraints_hit"):
+        lines.append(f"   ⚡ 软约束：{', '.join(result['soft_constraints_hit'])}")
+    if result.get("overlay_reasons"):
+        lines.append(f"   修正原因：{result['overlay_reasons'][0]}")
     if result.get("confidence"):
         lines.append(f"   置信度：{result['confidence']}")
     if result.get("risk_level"):
         lines.append(f"   风险等级：{result['risk_level']}")
     if result.get("final_summary"):
-        lines.append(f"   摘要：{result['final_summary'][:120]}")
+        lines.append(f"   摘要：{result['final_summary'][:100]}")
     ctx = result.get("portfolio_context", {})
     if ctx:
         lines.append(
             f"   组合：¥{ctx.get('total_equity', 0):,.0f} | "
             f"现金 ¥{ctx.get('portfolio_cash', 0):,.0f} | "
-            f"持仓 {ctx.get('holding_count', 0)} 只"
+            f"持仓 {ctx.get('holding_count', 0)} 只 | "
+            f"is_held={ctx.get('is_held')}"
         )
     if result.get("analysis_run_id"):
         lines.append(f"   DB run_id：{result['analysis_run_id']}")
