@@ -50,9 +50,9 @@ Quick reference: see [QUICKREF.md](./QUICKREF.md).
 <div align="center">
 <a href="https://www.star-history.com/#Gulinyue/TradingAgents&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date" />
-   <img alt="TradingAgents Star History" src="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date" style="width: 80%; height: auto;" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Gulinyue/TradingAgents&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Gulinyue/TradingAgents&type=Date" />
+   <img alt="TradingAgents Star History" src="https://api.star-history.com/svg?repos=Gulinyue/TradingAgents&type=Date" style="width: 80%; height: auto;" />
  </picture>
 </a>
 </div>
