@@ -1,6 +1,7 @@
 from langchain_core.tools import tool
 from typing import Annotated
 from tradingagents.dataflows.interface import route_to_vendor
+from tradingagents.agents.utils.agent_utils import _fix_chinese_stock_symbol
 
 @tool
 def get_indicators(
@@ -26,6 +27,6 @@ def get_indicators(
     if len(indicators) > 1:
         results = []
         for ind in indicators:
-            results.append(route_to_vendor("get_indicators", symbol, ind, curr_date, look_back_days))
+            results.append(route_to_vendor("get_indicators", _fix_chinese_stock_symbol(symbol), ind, curr_date, look_back_days))
         return "\n\n".join(results)
-    return route_to_vendor("get_indicators", symbol, indicator.strip(), curr_date, look_back_days)
+    return route_to_vendor("get_indicators", _fix_chinese_stock_symbol(symbol), indicator.strip(), curr_date, look_back_days)

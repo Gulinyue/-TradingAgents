@@ -1,6 +1,7 @@
 from langchain_core.tools import tool
 from typing import Annotated
 from tradingagents.dataflows.interface import route_to_vendor
+from tradingagents.agents.utils.agent_utils import _fix_chinese_stock_symbol
 
 
 @tool
@@ -19,4 +20,8 @@ def get_stock_data(
     Returns:
         str: A formatted dataframe containing the stock price data for the specified ticker symbol in the specified date range.
     """
-    return route_to_vendor("get_stock_data", symbol, start_date, end_date)
+    fixed_symbol = _fix_chinese_stock_symbol(symbol)
+    if fixed_symbol != symbol:
+        # Optionally log for debugging
+        pass
+    return route_to_vendor("get_stock_data", fixed_symbol, start_date, end_date)

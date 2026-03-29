@@ -22,11 +22,12 @@ DEFAULT_CONFIG = {
     "max_recur_limit": 100,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
+    # For A-shares: tushare + akshare are much better than yfinance
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "core_stock_apis": "tushare, yfinance",       # Tushare first for A-shares, fallback to yfinance
+        "technical_indicators": "yfinance",            # stockstats works for any market
+        "fundamental_data": "tushare, yfinance",       # Tushare has comprehensive A-share financials
+        "news_data": "akshare, tushare, yfinance",    # AKShare for Chinese news, Tushare for news
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

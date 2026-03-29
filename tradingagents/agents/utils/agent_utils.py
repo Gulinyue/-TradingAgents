@@ -1,4 +1,21 @@
 from langchain_core.messages import HumanMessage, RemoveMessage
+import re
+
+
+def _fix_chinese_stock_symbol(symbol: str) -> str:
+    """Auto-fix Chinese A-share tickers that may have lost their exchange suffix.
+
+    LLMs often strip exchange suffixes like .SZ or .SS when calling tools.
+    This detects common Chinese A-share patterns and restores the correct suffix.
+    """
+    if '.' in symbol:
+        return symbol
+    if re.match(r'^[01369]\d{5}$', symbol):
+        if symbol.startswith('6'):
+            return f"{symbol}.SS"
+        else:
+            return f"{symbol}.SZ"
+    return symbol
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import (
