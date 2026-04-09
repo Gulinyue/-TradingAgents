@@ -390,7 +390,7 @@ def analyze(
 
     if portfolio_context:
         from decision_policy import decide
-        from ranking import enrich_with_final_rank_score
+        from ranking import enrich_with_ranking_fields
 
         policy_result = decide(
             raw_action=raw_action,
@@ -414,20 +414,32 @@ def analyze(
         soft_constraints_hit = policy_result["soft_constraints_hit"]
         rank_reason = policy_result["rank_reason"]
         final_summary = ta_result.get("final_summary", ta_result.get("technical_report", ""))
-        ranked_result = enrich_with_final_rank_score({
-            "decision_rank_score": decision_rank_score,
-            "ml_score": ml_score,
-            "latest_prediction": latest_prediction,
-        })
+        ranked_result = enrich_with_ranking_fields(
+            {
+                "final_action": final_action,
+                "decision_rank_score": decision_rank_score,
+                "ml_score": ml_score,
+                "latest_prediction": latest_prediction,
+                "hard_constraints_hit": hard_constraints_hit,
+                "soft_constraints_hit": soft_constraints_hit,
+                "data_completeness": portfolio_snapshot.get("data_completeness", {}),
+            }
+        )
         normalized_ml_score = ranked_result.get("normalized_ml_score")
         final_rank_score = ranked_result.get("final_rank_score")
         ranking_blend_applied = ranked_result.get("ranking_blend_applied", False)
+        candidate_bucket = ranked_result.get("candidate_bucket")
+        bucket_reason = ranked_result.get("bucket_reason")
+        bucket_priority = ranked_result.get("bucket_priority")
         decision_json = {
             **policy_result,
             "ml_score": ml_score,
             "normalized_ml_score": normalized_ml_score,
             "final_rank_score": final_rank_score,
             "ranking_blend_applied": ranking_blend_applied,
+            "candidate_bucket": candidate_bucket,
+            "bucket_reason": bucket_reason,
+            "bucket_priority": bucket_priority,
             "latest_prediction": latest_prediction,
             "ta_decision": raw_action,
             "ta_result": ta_result,
@@ -457,11 +469,16 @@ def analyze(
         final_rank_score = None
         normalized_ml_score = None
         ranking_blend_applied = False
+        bucket_reason = None
+        bucket_priority = None
         decision_json = {
             "ml_score": ml_score,
             "normalized_ml_score": normalized_ml_score,
             "final_rank_score": final_rank_score,
             "ranking_blend_applied": ranking_blend_applied,
+            "candidate_bucket": candidate_bucket,
+            "bucket_reason": bucket_reason,
+            "bucket_priority": bucket_priority,
             "latest_prediction": latest_prediction,
             "ta_decision": raw_action,
             "ta_result": ta_result,
@@ -535,6 +552,8 @@ def analyze(
                 "hard_constraints_hit": hard_constraints_hit,
                 "soft_constraints_hit": soft_constraints_hit,
                 "candidate_bucket": candidate_bucket,
+                "bucket_reason": bucket_reason,
+                "bucket_priority": bucket_priority,
                 "decision_rank_score": decision_rank_score,
                 "final_rank_score": final_rank_score,
                 "normalized_ml_score": normalized_ml_score,
@@ -581,6 +600,8 @@ def analyze(
                 "ranking_blend_applied": ranking_blend_applied,
                 "latest_prediction": latest_prediction,
                 "candidate_bucket": candidate_bucket,
+                "bucket_reason": bucket_reason,
+                "bucket_priority": bucket_priority,
                 "rank_reason": rank_reason,
                 "portfolio_context": portfolio_context,
                 "ta_result": ta_result,
@@ -610,6 +631,8 @@ def analyze(
         "ranking_blend_applied": ranking_blend_applied,
         "latest_prediction": latest_prediction,
         "candidate_bucket": candidate_bucket,
+        "bucket_reason": bucket_reason,
+        "bucket_priority": bucket_priority,
         "rank_reason": rank_reason,
         "portfolio_context": portfolio_context,
         "analysis_run_id": run_id,
