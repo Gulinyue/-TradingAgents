@@ -1,5 +1,7 @@
 # TradingAgents × PostgreSQL V2 设计文档
 
+> **状态**：✅ **V2 已封板（v2.0.0）** | V2.1 稳定化进行中
+
 > 基于 V1/V1.1 基线：tradingagents_runner/ 已承担数据库驱动壳层，runner.py 支持 DB 上下文，portfolio_context.py 读取 core.account_balances。
 
 ## 1. 目标

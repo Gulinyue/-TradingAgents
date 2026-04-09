@@ -12,10 +12,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# Resolve imports
+# Resolve imports (must come before module imports below)
 _repo_root = Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(_repo_root))
 sys.path.insert(0, str(Path(__file__).parent))
+
+from serialization import deep_serialize, json_dumps_safe
+from run_status import evaluate_run_status
 
 # .env loading (shared with db.py, idempotent)
 import os as _os
@@ -47,6 +50,7 @@ def get_default_config() -> Dict[str, Any]:
     # yfinance 对 A 股失效时会自然失败，不阻断；其他场景有 fallback
     cfg["data_vendors"] = {
         "core_stock_apis": "tushare,yfinance",
+        "technical_indicators": "yfinance",
         "fundamental_data": "tushare,alpha_vantage",
         "news_data": "tushare,akshare,yfinance",
     }
@@ -58,56 +62,126 @@ def get_default_config() -> Dict[str, Any]:
 # Decision normalization
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _deep_float(obj):
+    """Recursively convert Decimal → float, leave other types intact. Safe for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _deep_float(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_deep_float(x) for x in obj]
+    elif isinstance(obj, float):
+        return obj
+    elif isinstance(obj, (int, bool)):
+        return obj
+    elif hasattr(obj, "__float__"):  # Decimal 等
+        return float(obj)
+    return obj
+
+
 def _normalize_decision(raw) -> str:
-    """将原始决策词归一化为 ENTER/ADD/HOLD/TRIM/EXIT/AVOID/REVIEW"""
-    s = str(raw).upper().strip()
-    if "BUY" in s or "买入" in s or "增持" in s or "ENTER" in s:
+    """将原始决策文本归一化为 ENTER/ADD/HOLD/TRIM/EXIT/AVOID/REVIEW"""
+    import re
+    s = str(raw)
+
+    # 优先：提取显式评级标签 "Rating: **ACTION**" 或 "FINAL TRANSACTION PROPOSAL: **ACTION**
+    rating_match = re.search(r'(?:Rating[:\s]+|FINAL\s+TRANSACTION\s+PROPOSAL[:\s*]+)\*?\*?([A-Z]+)\*?\*?', s, re.IGNORECASE)
+    if rating_match:
+        action = rating_match.group(1).upper()
+        if action in ("ENTER", "BUY"):
+            return "ENTER"
+        if action == "ADD":
+            return "ADD"
+        if action in ("HOLD", "NEUTRAL"):
+            return "HOLD"
+        if action in ("SELL", "REDUCE"):
+            return "SELL"
+        if action == "TRIM":
+            return "TRIM"
+        if action in ("EXIT", "LIQUIDATE"):
+            return "EXIT"
+        if action == "AVOID":
+            return "AVOID"
+        if action in ("REVIEW", "SCAN"):
+            return "REVIEW"
+
+    # 其次：用单词边界匹配（排除被 **markdown** 包裹的误匹配）
+    # 清理 markdown bold/italic
+    clean = re.sub(r'\*\*(.*?)\*\*', r'\1', s)  # **HOLD** -> HOLD
+    clean = re.sub(r'\*(.*?)\*', r'\1', clean)   # *HOLD* -> HOLD
+    clean_upper = clean.upper()
+
+    def has_word(patterns):
+        """English: word boundary match. Chinese: substring match."""
+        for p in patterns:
+            if p.isascii():
+                if re.search(r'\b' + re.escape(p) + r'\b', clean_upper):
+                    return True
+            else:
+                if p in clean_upper:
+                    return True
+        return False
+
+    if has_word(["BUY", "买入", "增持", "ENTER"]):
         return "ENTER"
-    elif "ADD" in s or "加仓" in s:
+    elif has_word(["ADD", "加仓"]) and "DO NOT ADD" not in clean_upper:
         return "ADD"
-    elif "SELL" in s or "卖出" in s or "减持" in s:
+    elif has_word(["SELL", "卖出", "减持"]):
         return "SELL"
-    elif "TRIM" in s or "减仓" in s:
+    elif has_word(["TRIM", "减仓"]):
         return "TRIM"
-    elif "EXIT" in s or "清仓" in s:
+    elif has_word(["EXIT", "清仓", "平仓"]):
         return "EXIT"
-    elif "AVOID" in s or "回避" in s:
+    elif has_word(["AVOID", "回避", "规避"]):
         return "AVOID"
-    elif "HOLD" in s or "持有" in s or "观望" in s or "REVIEW" in s:
+    elif has_word(["HOLD", "持有", "观望"]):
+        return "HOLD"
+    elif has_word(["REVIEW", "复核", "待定", "SCAN"]):
         return "REVIEW"
-    return "REVIEW"  # 默认 REVIEW
+    return "REVIEW"  # 默认
 
 
-def _parse_ta_result(ticker: str, trade_date: str) -> Dict[str, Any]:
+def _parse_ta_result(ticker: str, trade_date: str) -> tuple:
+    """
+    返回 (result_dict, fallback_triggered: bool)
+    fallback_triggered=True 表示走了 eval_results fallback 路径。
+    """
     """
     从 TradingAgents 输出的 JSON 文件中解析结构化结果。
-    优先读 results/ 下的结构化文件，兜底读旧格式。
+    优先读 results/ 下的结构化文件，再按以下顺序兜底：
+      1. eval_results/{ticker}.{exchange}/TradingAgentsStrategy_logs/full_states_log_{date}.json
+      2. results/{ticker_dotted}/TradingAgentsStrategy_logs/full_states_log_{date}.json
     """
     result_dir = Path(__file__).parent.parent / "results"
     out_file = result_dir / f"{ticker.replace('.', '_')}_{trade_date}.json"
 
+    # 优先级1：results/600519_SH_2026-03-29.json（结构化输出）
     if out_file.exists():
         try:
-            return json.loads(out_file.read_text(encoding="utf-8"))
+            return json.loads(out_file.read_text(encoding="utf-8")), False
         except Exception:
             pass
 
-    # 兜底：读 TradingAgents 内部日志
-    log_file = (
-        result_dir
-        / ticker.replace(".", "_")
-        / "TradingAgentsStrategy_logs"
-        / f"full_states_log_{trade_date}.json"
-    )
-    if log_file.exists():
+    # 优先级2：eval_results/ fallback
+    eval_results_dir = Path(__file__).parent.parent / "eval_results"
+    log_file_candidates = [
+        eval_results_dir / ticker / "TradingAgentsStrategy_logs" / f"full_states_log_{trade_date}.json",
+        result_dir / ticker.replace(".", "_") / "TradingAgentsStrategy_logs" / f"full_states_log_{trade_date}.json",
+    ]
+
+    for log_file in log_file_candidates:
+        if not log_file.exists():
+            continue
         try:
             full = json.loads(log_file.read_text(encoding="utf-8"))
             ts_data = full.get(trade_date, {})
-            raw_decision = ts_data.get("trader_investment_decision", "REVIEW")
+            raw_decision = (
+                ts_data.get("final_trade_decision")
+                or ts_data.get("trader_investment_decision")
+                or ts_data.get("judge_decision", "")
+            )
             return {
                 "decision": _normalize_decision(raw_decision),
-                "decision_score": str(raw_decision).strip(),
-                "technical_report": ts_data.get("technical_report", ""),
+                "decision_score": str(raw_decision).strip()[:200],
+                "technical_report": ts_data.get("technical_report") or ts_data.get("market_report", ""),
                 "fundamental_report": ts_data.get("fundamentals_report", ""),
                 "news_events": ts_data.get("news_events", []),
                 "sentiment": ts_data.get("sentiment_report", ""),
@@ -119,7 +193,7 @@ def _parse_ta_result(ticker: str, trade_date: str) -> Dict[str, Any]:
                     "news": ts_data.get("news_report", ""),
                     "fundamentals": ts_data.get("fundamentals_report", ""),
                 },
-            }
+            }, True   # fallback triggered
         except Exception:
             pass
 
@@ -133,7 +207,7 @@ def _parse_ta_result(ticker: str, trade_date: str) -> Dict[str, Any]:
         "risk_factors": [],
         "analyst_signals": {},
         "raw_full_report": "",
-    }
+    }, True   # fallback triggered（无文件可读）
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,7 +378,7 @@ def analyze(
         raise
 
     # ── 解析 TA 原始结果 ────────────────────────────────────────
-    ta_result = _parse_ta_result(ticker, trade_date)
+    ta_result, parser_fallback_triggered = _parse_ta_result(ticker, trade_date)
 
     # ── V2 三阶段：组合约束决策 ─────────────────────────────────
     if portfolio_context:
@@ -371,11 +445,13 @@ def analyze(
     bar_count = dc.get("bar_count", 0)
 
     data_completeness = {
-        "has_enough_bars": bar_count >= 20,
+        "has_enough_bars": bar_count >= 60,
         "bar_count": bar_count,
         "has_balance": dc.get("has_balance", False),
         "has_factors": dc.get("has_factors", False),
         "has_prediction": dc.get("has_prediction", False),
+        "has_minimum_bars": bar_count >= 20,
+        "bar_quality_level": "full" if bar_count >= 120 else ("good" if bar_count >= 60 else ("minimum_only" if bar_count >= 20 else "insufficient")),
     }
 
     # raw_output_quality（来自 TA 原始输出）
@@ -388,51 +464,29 @@ def analyze(
         "ta_decision_nondefault": raw_action not in ("REVIEW", "UNKNOWN", ""),
     }
 
-    # 三元状态判断
-    # success: TA 输出质量达标（报告非空 + 置信度存在）
-    # partial: 链路完整但 TA 输出退化（数据不足或质量差）
-    # failed: 链路未完成（TA propagate 直接抛异常在上面已处理）
-    ta_is_healthy = (
-        raw_output_quality["technical_report_nonempty"]
-        and raw_output_quality["fundamental_report_nonempty"]
-        and raw_output_quality["raw_confidence_present"]
+    # ── 标准化状态判定 ──────────────────────────────────────────
+    status_result = evaluate_run_status(
+        data_completeness=data_completeness,
+        raw_output_quality=raw_output_quality,
+        ta_executed=True,   # 走到这里说明 TA 没抛异常
+        db_write_ok=True,   # write_db 失败不影响 status，只打 warning
+        parser_fallback_triggered=parser_fallback_triggered,
     )
-    data_is_enough = (
-        data_completeness["has_enough_bars"]
-        and data_completeness["has_balance"]
-    )
-    if ta_is_healthy and data_is_enough:
-        run_status = "success"
-    elif not ta_is_healthy or not data_completeness["has_balance"]:
-        run_status = "partial"
-    else:
-        run_status = "partial"  # 缺数据但链路完整，都算 partial
+    run_status = status_result.run_status
+    status_reason = status_result.status_reason
+    status_tags = status_result.status_tags
 
     # ── 写 DB ─────────────────────────────────────────────────
     if write_db and research_repo and run_id:
         try:
-            # 把质量评估写进 decision_json
-            # 注意：portfolio_context 中可能含 Decimal（来自 DB），需全部转为 float
-            def _deep_float(obj):
-                if isinstance(obj, dict):
-                    return {k: _deep_float(v) for k, v in obj.items()}
-                elif isinstance(obj, (list, tuple)):
-                    return [_deep_float(x) for x in obj]
-                elif isinstance(obj, float):
-                    return obj  # already float
-                elif isinstance(obj, (int, bool)):
-                    return obj  # int/bool keep as-is
-                elif hasattr(obj, "__float__"):  # Decimal 等
-                    return float(obj)
-                return obj
-
+            # 把质量评估写进 decision_json（deep_serialize 处理 Decimal 等）
             enriched_decision_json = {
                 **decision_json,
                 "data_completeness": data_completeness,
                 "raw_output_quality": raw_output_quality,
                 "run_status": run_status,
             }
-            enriched_decision_json = _deep_float(enriched_decision_json)
+            enriched_decision_json = deep_serialize(enriched_decision_json)
 
             research_repo.insert_analysis_decision(
                 run_id=run_id,
@@ -447,7 +501,7 @@ def analyze(
                 decision_json=enriched_decision_json,
             )
 
-            runtime_meta_final = {
+            runtime_meta_final = deep_serialize({
                 "overlay_reasons": overlay_reasons,
                 "hard_constraints_hit": hard_constraints_hit,
                 "soft_constraints_hit": soft_constraints_hit,
@@ -456,7 +510,9 @@ def analyze(
                 "data_completeness": data_completeness,
                 "raw_output_quality": raw_output_quality,
                 "run_status": run_status,
-            }
+                "status_reason": status_reason,
+                "status_tags": status_tags,
+            })
             research_repo.update_run_status(
                 run_id,
                 run_status,
@@ -472,15 +528,8 @@ def analyze(
         result_dir.mkdir(parents=True, exist_ok=True)
         out_file = result_dir / f"{ticker.replace('.', '_')}_{trade_date}.json"
 
-        def _json_default(o):
-            """处理 date/datetime 等非 JSON 类型."""
-            import datetime
-            if isinstance(o, (datetime.date, datetime.datetime)):
-                return o.isoformat()
-            raise TypeError(f"{o.__class__.__name__} is not JSON serializable")
-
         out_file.write_text(
-            json.dumps({
+            json_dumps_safe({
                 "ticker": ticker,
                 "trade_date": trade_date,
                 "account_code": account_code,
@@ -500,7 +549,7 @@ def analyze(
                 "ta_result": ta_result,
                 "analysis_run_id": run_id,
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }, ensure_ascii=False, indent=2, default=_json_default),
+            }, indent=2),
             encoding="utf-8",
         )
 
@@ -523,6 +572,10 @@ def analyze(
         "portfolio_context": portfolio_context,
         "analysis_run_id": run_id,
         "ta_result": ta_result,
+        "run_status": run_status,
+        "status_reason": status_reason,
+        "status_tags": status_tags,
+        "parser_fallback_triggered": parser_fallback_triggered,
     }
 
 

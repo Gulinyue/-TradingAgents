@@ -164,6 +164,10 @@ def build_context(
         soft_constraints_hit.append("no_factors")
     if data_comp.get("has_bar") is False:
         soft_constraints_hit.append("no_bar")
+    # bar 充足性（v1 新增）
+    bar_level = data_comp.get("bar_quality_level", "insufficient")
+    if bar_level in ("insufficient", "minimum_only"):
+        soft_constraints_hit.append(f"bar_quality_{bar_level}")
     if data_comp.get("has_prediction"):
         soft_constraints_hit.append("has_ml_prediction")
 

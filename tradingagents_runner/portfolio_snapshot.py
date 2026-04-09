@@ -28,6 +28,7 @@ from repositories import (
     ResearchV2Repository,
     normalize_db_symbol,
 )
+from data_quality import assess_bar_quality
 
 
 def build_snapshot(
@@ -134,11 +135,17 @@ def build_snapshot(
 
     # ── 数据完整性标记 ────────────────────────────────────────
     bar_count = market_repo.get_bar_count(symbol)
+    bar_quality = assess_bar_quality(bar_count)
     data_completeness = {
         "has_balance": balance is not None,
         "has_bar": latest_bar is not None,
         "bar_count": bar_count,
-        "has_enough_bars": bar_count >= 20,       # 20条以上才能支撑基础技术指标
+        "has_minimum_bars": bar_quality["has_minimum_bars"],
+        "has_enough_bars": bar_quality["has_enough_bars"],   # >= 60 bars（推荐标准）
+        "has_full_bars": bar_quality["has_full_bars"],
+        "bar_quality_level": bar_quality["level"],
+        "bars_to_good": bar_quality["bars_to_good"],
+        "bars_to_full": bar_quality["bars_to_full"],
         "has_factors": len(latest_factors) > 0,
         "has_prediction": latest_prediction is not None,
         "has_constraints": constraints.get("max_symbol_weight", 0) > 0,

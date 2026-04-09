@@ -218,5 +218,9 @@ def get_indicator(
         return result_str
 
     except Exception as e:
+        from .alpha_vantage_common import AlphaVantageRateLimitError
+        # Let rate-limit errors bubble up so route_to_vendor can try the next vendor
+        if "rate limit" in str(e).lower() or isinstance(e, AlphaVantageRateLimitError):
+            raise
         print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")
         return f"Error retrieving {indicator} data: {str(e)}"
