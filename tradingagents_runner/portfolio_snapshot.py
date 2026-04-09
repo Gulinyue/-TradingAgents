@@ -131,7 +131,11 @@ def build_snapshot(
     latest_factors = market_repo.get_latest_factors(symbol, trade_date)
 
     # ── 最新 ML 预测 ─────────────────────────────────────────
-    latest_prediction = research_repo.get_latest_model_prediction(symbol, account_id)
+    latest_prediction = research_repo.get_latest_model_prediction(
+        symbol,
+        account_id,
+        prediction_date=trade_date,
+    )
 
     # ── 数据完整性标记 ────────────────────────────────────────
     bar_count = market_repo.get_bar_count(symbol)

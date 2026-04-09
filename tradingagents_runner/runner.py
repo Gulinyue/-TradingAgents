@@ -276,6 +276,7 @@ def analyze(
 
     # ── DB 上下文（可选）─────────────────────────────────────────
     portfolio_context: Dict[str, Any] = {}
+    portfolio_snapshot: Dict[str, Any] = {}
     research_repo = None
     account_repo = None
     run_id: Optional[int] = None
@@ -381,8 +382,15 @@ def analyze(
     ta_result, parser_fallback_triggered = _parse_ta_result(ticker, trade_date)
 
     # ── V2 三阶段：组合约束决策 ─────────────────────────────────
+    latest_prediction = portfolio_snapshot.get("latest_prediction") if portfolio_snapshot else None
+    ml_score = latest_prediction.get("score") if latest_prediction else None
+    normalized_ml_score = None
+    final_rank_score = decision_rank_score = None
+    ranking_blend_applied = False
+
     if portfolio_context:
         from decision_policy import decide
+        from ranking import enrich_with_final_rank_score
 
         policy_result = decide(
             raw_action=raw_action,
@@ -406,8 +414,21 @@ def analyze(
         soft_constraints_hit = policy_result["soft_constraints_hit"]
         rank_reason = policy_result["rank_reason"]
         final_summary = ta_result.get("final_summary", ta_result.get("technical_report", ""))
+        ranked_result = enrich_with_final_rank_score({
+            "decision_rank_score": decision_rank_score,
+            "ml_score": ml_score,
+            "latest_prediction": latest_prediction,
+        })
+        normalized_ml_score = ranked_result.get("normalized_ml_score")
+        final_rank_score = ranked_result.get("final_rank_score")
+        ranking_blend_applied = ranked_result.get("ranking_blend_applied", False)
         decision_json = {
             **policy_result,
+            "ml_score": ml_score,
+            "normalized_ml_score": normalized_ml_score,
+            "final_rank_score": final_rank_score,
+            "ranking_blend_applied": ranking_blend_applied,
+            "latest_prediction": latest_prediction,
             "ta_decision": raw_action,
             "ta_result": ta_result,
             "portfolio_snapshot": {
@@ -433,7 +454,15 @@ def analyze(
         hard_constraints_hit = []
         soft_constraints_hit = []
         rank_reason = ""
+        final_rank_score = None
+        normalized_ml_score = None
+        ranking_blend_applied = False
         decision_json = {
+            "ml_score": ml_score,
+            "normalized_ml_score": normalized_ml_score,
+            "final_rank_score": final_rank_score,
+            "ranking_blend_applied": ranking_blend_applied,
+            "latest_prediction": latest_prediction,
             "ta_decision": raw_action,
             "ta_result": ta_result,
         }
@@ -507,6 +536,9 @@ def analyze(
                 "soft_constraints_hit": soft_constraints_hit,
                 "candidate_bucket": candidate_bucket,
                 "decision_rank_score": decision_rank_score,
+                "final_rank_score": final_rank_score,
+                "normalized_ml_score": normalized_ml_score,
+                "ranking_blend_applied": ranking_blend_applied,
                 "data_completeness": data_completeness,
                 "raw_output_quality": raw_output_quality,
                 "run_status": run_status,
@@ -543,6 +575,11 @@ def analyze(
                 "hard_constraints_hit": hard_constraints_hit,
                 "soft_constraints_hit": soft_constraints_hit,
                 "decision_rank_score": decision_rank_score,
+                "final_rank_score": final_rank_score,
+                "ml_score": ml_score,
+                "normalized_ml_score": normalized_ml_score,
+                "ranking_blend_applied": ranking_blend_applied,
+                "latest_prediction": latest_prediction,
                 "candidate_bucket": candidate_bucket,
                 "rank_reason": rank_reason,
                 "portfolio_context": portfolio_context,
@@ -567,6 +604,11 @@ def analyze(
         "hard_constraints_hit": hard_constraints_hit,
         "soft_constraints_hit": soft_constraints_hit,
         "decision_rank_score": decision_rank_score,
+        "final_rank_score": final_rank_score,
+        "ml_score": ml_score,
+        "normalized_ml_score": normalized_ml_score,
+        "ranking_blend_applied": ranking_blend_applied,
+        "latest_prediction": latest_prediction,
         "candidate_bucket": candidate_bucket,
         "rank_reason": rank_reason,
         "portfolio_context": portfolio_context,
@@ -609,8 +651,12 @@ def quick_summary(result: dict) -> str:
         f"   原始信号：{result.get('raw_decision', 'N/A')}",
         f"   候选桶：{result.get('candidate_bucket', 'N/A')}",
     ]
-    if result.get("decision_rank_score") is not None:
+    if result.get("final_rank_score") is not None:
+        lines.append(f"   最终排序分：{result['final_rank_score']:.4f}")
+    elif result.get("decision_rank_score") is not None:
         lines.append(f"   排序分数：{result['decision_rank_score']:.4f}")
+    if result.get("normalized_ml_score") is not None:
+        lines.append(f"   ML 分数：{result['normalized_ml_score']:.4f}")
     if result.get("hard_constraints_hit"):
         lines.append(f"   ⚠️ 硬约束：{', '.join(result['hard_constraints_hit'])}")
     if result.get("soft_constraints_hit"):

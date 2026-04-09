@@ -709,28 +709,62 @@ class AccountSnapshotRepository(BaseRepository):
 class ResearchV2Repository(BaseRepository):
     """V2 扩展：研究层新增读取方法。"""
 
+    def _get_latest_model_prediction_for_account_scope(
+        self,
+        symbol: str,
+        *,
+        account_id: Optional[int],
+        prediction_date: Optional[str],
+        horizon: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        clauses = ["symbol = %s"]
+        params: List[Any] = [symbol]
+
+        if account_id is None:
+            clauses.append("account_id IS NULL")
+        else:
+            clauses.append("account_id = %s")
+            params.append(account_id)
+
+        if prediction_date is not None:
+            clauses.append("prediction_date <= %s")
+            params.append(prediction_date)
+
+        if horizon is not None:
+            clauses.append("horizon = %s")
+            params.append(horizon)
+
+        sql = f"""
+        SELECT *
+        FROM research.model_predictions
+        WHERE {' AND '.join(clauses)}
+        ORDER BY prediction_date DESC, created_at DESC
+        LIMIT 1;
+        """
+        return self._fetch_one(sql, tuple(params))
+
     def get_latest_model_prediction(
         self,
         symbol: str,
         account_id: Optional[int] = None,
+        prediction_date: Optional[str] = None,
+        horizon: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """取最新 ML 模型预测。"""
+        """取最新 ML 模型预测，优先账户级，缺失时回退到全局(account_id IS NULL)。"""
         symbol = normalize_db_symbol(symbol)
-        if account_id:
-            sql = """
-            SELECT *
-            FROM research.model_predictions
-            WHERE symbol = %s AND account_id = %s
-            ORDER BY prediction_date DESC, created_at DESC
-            LIMIT 1;
-            """
-            return self._fetch_one(sql, (symbol, account_id))
-        else:
-            sql = """
-            SELECT *
-            FROM research.model_predictions
-            WHERE symbol = %s
-            ORDER BY prediction_date DESC, created_at DESC
-            LIMIT 1;
-            """
-            return self._fetch_one(sql, (symbol,))
+        if account_id is not None:
+            scoped = self._get_latest_model_prediction_for_account_scope(
+                symbol,
+                account_id=account_id,
+                prediction_date=prediction_date,
+                horizon=horizon,
+            )
+            if scoped is not None:
+                return scoped
+
+        return self._get_latest_model_prediction_for_account_scope(
+            symbol,
+            account_id=None,
+            prediction_date=prediction_date,
+            horizon=horizon,
+        )
